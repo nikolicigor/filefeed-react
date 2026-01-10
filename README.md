@@ -1,16 +1,38 @@
 # @filefeed/react
 
-Embedded FileFeed is an SDK wrapper that enables you to seamlessly integrate a secure and intuitive data import experience into your React application. With full customization options for colors, fonts, and logos, you can easily align the import interface with your brand identity.
+Embedded FileFeed is a React SDK wrapper by [FileFeed](https://filefeed.io) that lets you seamlessly embed a secure and intuitive data import experience into your application.
 
-By using embedded FileFeed, you empower your users with a self-serve and guided import process. The importer handles file parsing, validation, and upload—so your team can focus on building instead of managing CSV errors.
+With full customization support for colors, fonts, and logos, you can match the importer UI to your brand while giving users a guided, self-serve way to upload their data.
 
-If you're looking for alternative integration methods that fit your business needs, explore our [FileFeed Flows](https://docs.filefeed.io/quickstart).
+By using Embedded FileFeed, your users can import CSV and Excel files without friction, while your team avoids building and maintaining custom file parsing, validation, and error handling logic.
+
+---
+
+## Why use Embedded FileFeed
+
+Handling file-based data imports is harder than it looks. CSVs are often malformed, inconsistent, or missing required fields.
+
+Embedded FileFeed handles:
+
+- File parsing and validation
+- Schema mapping and field transformations
+- User-friendly validation errors and guidance
+- Secure uploads and ingestion
+
+This allows your team to focus on product development instead of debugging CSV issues and manual data fixes.  
+Learn more about how FileFeed automates data onboarding at scale at https://filefeed.io.
+
+---
 
 ## Before you begin
 
-The minimum supported version of React is v17.
-If you're using an older version, upgrade React to use this library.
+The minimum supported React version is **v17**.
 
-## Get started
+If you are using an older version, please upgrade React before installing this library.
 
-[Follow this guide](https://docs.filefeed.io/embedded-importers/react-sdk) to configure a FileFeed embedded import experience in your app.
+---
+
+## Installation
+
+```bash
+npm install @filefeed/react

@@ -1,6 +1,6 @@
 {
   "name": "@filefeed/react",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "A powerful data onboarding SDK for importing, mapping, validating, and transforming structured data",
   "main": "dist/client.js",
   "module": "dist/client.esm.js",
@@ -28,7 +28,7 @@
     "type": "git",
     "url": "git+https://github.com/FileFeed/filefeed-react.git"
   },
-  "homepage": "https://github.com/FileFeed/filefeed-react#readme",
+  "homepage": "https://filefeed.io",
   "bugs": {
     "url": "https://github.com/FileFeed/filefeed-react/issues"
   },

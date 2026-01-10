@@ -68,6 +68,7 @@ export default {
       format: { comments: false },
       compress: { passes: 2 },
       mangle: true,
+      maxWorkers: 1,
     }),
   ],
 };

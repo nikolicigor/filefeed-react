@@ -190,7 +190,7 @@ describe("validateFieldWithRegistry", () => {
     const field = makeField({
       validations: [{ type: "custom", name: "isEven", message: "Must be even" }],
     });
-    const registry: Record<string, (...args: any[]) => string | false | null> = {
+    const registry: Record<string, (...args: unknown[]) => string | false | null> = {
       isEven: (val: unknown) => Number(val) % 2 === 0 ? null : false,
     };
     expect(validateFieldWithRegistry(3, field, 0, {}, registry)).toHaveLength(1);

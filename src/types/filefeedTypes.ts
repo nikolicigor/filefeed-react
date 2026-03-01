@@ -1,5 +1,6 @@
 import type { FieldType as BaseFieldType } from "./index";
 
+// eslint-disable-next-line @typescript-eslint/no-namespace
 export namespace Filefeed {
   export type FieldType = BaseFieldType;
 
@@ -19,9 +20,9 @@ export namespace Filefeed {
   };
 
   export type RecordAPI = {
-    get: (key: string) => any;
-    set: (key: string, value: any) => void;
-    toObject: () => Record<string, any>;
+    get: (key: string) => unknown;
+    set: (key: string, value: unknown) => void;
+    toObject: () => Record<string, unknown>;
   };
 
   type FieldsOf<S> = S extends { fields: readonly (infer A)[] }
@@ -47,5 +48,3 @@ export namespace Filefeed {
 
   export type SubmitHandler<S extends SheetConfig> = (args: { rows: RecordFor<S>[]; slug: string }) => void | Promise<void>;
 }
-
-

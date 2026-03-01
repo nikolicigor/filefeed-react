@@ -275,9 +275,11 @@ export function ReviewStep({
   }, []);
 
   useEffect(() => {
+    const unpinRef = unpinTimerRef;
+    const animRef = rafRef;
     return () => {
-      if (unpinTimerRef.current) window.clearTimeout(unpinTimerRef.current);
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (unpinRef.current) window.clearTimeout(unpinRef.current);
+      if (animRef.current) cancelAnimationFrame(animRef.current);
     };
   }, []);
 

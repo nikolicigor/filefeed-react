@@ -157,7 +157,6 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
   canContinue,
 }) => {
   const [hoveredSource, setHoveredSource] = useState<string | null>(null);
-  const [draggedSource, setDraggedSource] = useState<string | null>(null);
   const [lastHoveredSource, setLastHoveredSource] = useState<string | null>(null);
   const [missingModalOpen, setMissingModalOpen] = useState(false);
 
@@ -197,28 +196,6 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
     }
   }, [fieldMappings, mapping, onFieldMappingsChange]);
 
-  const handleDragStart = useCallback((e: React.DragEvent, sourceColumn: string) => {
-    setDraggedSource(sourceColumn);
-    e.dataTransfer.setData("text/plain", sourceColumn);
-  }, []);
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-  }, []);
-
-  const handleDrop = useCallback((e: React.DragEvent, targetField: string) => {
-    e.preventDefault();
-    const sourceColumn = e.dataTransfer.getData("text/plain");
-    if (sourceColumn) {
-      handleMappingUpdate(sourceColumn, targetField);
-    }
-    setDraggedSource(null);
-  }, [handleMappingUpdate]);
-
-  const handleRemoveMapping = useCallback((sourceColumn: string) => {
-    handleMappingUpdate(sourceColumn, null);
-  }, [handleMappingUpdate]);
-
   const getPreviewData = useCallback((sourceColumn: string) => {
     if (!importedData?.rows) return [];
     return importedData.rows
@@ -233,11 +210,10 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
     [fieldMappings, mapping]
   );
 
-  const { mappedCount, usedTargets, availableTargets, missingRequired } = useMemo(() => {
+  const { mappedCount, availableTargets, missingRequired } = useMemo(() => {
     const used = Object.values(effectiveMapping).filter(Boolean) as string[];
     return {
       mappedCount: used.length,
-      usedTargets: used,
       availableTargets: fields.filter((field) => !used.includes(field.key)),
       missingRequired: fields.filter((f) => f.required && !used.includes(f.key)),
     };

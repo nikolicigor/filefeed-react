@@ -9,11 +9,9 @@ import {
   ValidationError,
   FieldMapping,
   FieldConfig,
-  TransformRegistry,
   SheetConfig,
 } from "../types";
 import {
-  generateAutoMapping as computeAutoMappingSync,
   generateAutoMappingAsync as computeAutoMappingAsync,
   processRowBatch,
   applyUniquenessChecks,

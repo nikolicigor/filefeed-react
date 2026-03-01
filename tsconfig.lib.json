@@ -19,13 +19,5 @@
         "@/stores/*": ["src/stores/*"]
       }
     },
-    "include": ["src/**/*"],
-    "exclude": [
-      "src/app/layout.tsx",
-      "src/app/page.tsx",
-      "src/app/globals.css",
-      "src/components/DataTable.tsx",
-      "src/components/FileImport.tsx",
-      "src/utils/mappingStorage.ts"
-    ]
+    "include": ["src/**/*"]
   }

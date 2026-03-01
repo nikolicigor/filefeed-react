@@ -8,43 +8,40 @@ import {
   DataRow,
   ValidationError,
   FieldMapping,
+  FieldConfig,
   TransformRegistry,
+  SheetConfig,
 } from "../types";
 import {
-  generateAutoMapping,
-  processImportedDataWithMappings,
+  generateAutoMapping as computeAutoMappingSync,
+  generateAutoMappingAsync as computeAutoMappingAsync,
+  processRowBatch,
+  applyUniquenessChecks,
   mappingStateToFieldMappings,
   fieldMappingsToMappingState,
   defaultTransforms,
   validateFieldWithRegistry,
-  transformValue,
-  applyNamedTransform,
 } from "../utils/dataProcessing";
-
-let processingRunId = 0;
+import { PROCESSING } from "../constants";
 
 interface WorkbookActions {
   setConfig: (config: CreateWorkbookConfig) => void;
-  setCurrentSheet: (sheetSlug: string) => void;
 
   setImportedData: (data: ImportedData) => void;
   clearImportedData: () => void;
 
   setMapping: (mapping: MappingState) => void;
+  setMappingBatch: (mapping: MappingState) => void;
   updateMapping: (sourceColumn: string, targetField: string | null) => void;
-  generateAutoMapping: () => void;
   setFieldMappings: (fieldMappings: FieldMapping[]) => void;
-  setTransformRegistry: (registry: TransformRegistry) => void;
 
-  processData: () => void;
   processDataChunked: () => Promise<void>;
   processOnContinue: () => Promise<void>;
   cancelProcessing: () => void;
   setProcessedRows: (rows: DataRow[]) => void;
-  updateRowData: (rowId: string, fieldKey: string, value: any) => void;
+  updateRowData: (rowId: string, fieldKey: string, value: unknown) => void;
   deleteRow: (rowId: string) => void;
   deleteInvalidRows: () => void;
-  addRow: () => void;
 
   setLoading: (loading: boolean) => void;
 
@@ -70,488 +67,409 @@ const initialState: WorkbookState = {
   validationRegistry: undefined,
 };
 
-export const createWorkbookStore = (): StoreApi<WorkbookStore> =>
-  createStore<WorkbookStore>()((set, get) => ({
+function getCurrentSheetConfig(state: WorkbookState): SheetConfig | undefined {
+  return state.config.sheets.find((s) => s.slug === state.currentSheet);
+}
+
+function extractValidationErrors(rows: DataRow[]): ValidationError[] {
+  return rows.flatMap((r) => r.errors || []);
+}
+
+/**
+ * Strip existing uniqueness errors from all rows, then re-run uniqueness
+ * checks from scratch. Necessary after any mutation (edit, delete) that
+ * could create or resolve duplicate values.
+ */
+function refreshUniqueness(rows: DataRow[], fields: FieldConfig[]): DataRow[] {
+  const uniqueFields = fields.filter((f) => f.unique);
+  if (uniqueFields.length === 0) return rows;
+
+  const uniqueKeys = new Set(uniqueFields.map((f) => f.key));
+
+  const cleaned = rows.map((row) => {
+    const kept = row.errors.filter(
+      (e) => !uniqueKeys.has(e.field) || !e.message.includes("must be unique")
+    );
+    if (kept.length === row.errors.length) return row;
+    return {
+      ...row,
+      errors: kept,
+      isValid: kept.filter((e) => e.severity === "error").length === 0,
+    };
+  });
+
+  return applyUniquenessChecks(cleaned, fields);
+}
+
+export const createWorkbookStore = (): StoreApi<WorkbookStore> => {
+  let processingRunId = 0;
+
+  return createStore<WorkbookStore>()((set, get) => ({
     ...initialState,
 
-      setConfig: (config) => {
-        set({
-          config,
-          transformRegistry: config.transformRegistry || defaultTransforms,
-          validationRegistry: config.validationRegistry,
-        });
-        if (config.sheets && config.sheets.length > 0) {
-          const first = config.sheets[0];
-          set({
-            currentSheet: first.slug,
-            pipelineMappings: first.pipelineMappings,
-          });
+    setConfig: (config) => {
+      if (config.sheets.length === 0) {
+        if (typeof process !== "undefined" && process.env?.NODE_ENV !== "production") {
+          console.warn("[Filefeed] config.sheets is empty — the SDK requires at least one sheet to function.");
         }
-      },
+      }
+      const first = config.sheets[0];
+      set({
+        config,
+        transformRegistry: config.transformRegistry || defaultTransforms,
+        validationRegistry: config.validationRegistry,
+        ...(first && {
+          currentSheet: first.slug,
+          pipelineMappings: first.pipelineMappings,
+        }),
+      });
+    },
 
-      setProcessedRows: (rows) => {
-        set({ processedData: rows });
-        const validationErrors = rows.flatMap((r) => r.errors || []);
-        set({ validationErrors });
-      },
+    setProcessedRows: (rows) => {
+      set({
+        processedData: rows,
+        validationErrors: extractValidationErrors(rows),
+      });
+    },
 
-      setCurrentSheet: (sheetSlug) => {
-        set({ currentSheet: sheetSlug });
-        set({
-          importedData: null,
-          mappingState: {},
-          processedData: [],
-          validationErrors: [],
-          pipelineMappings: get().config.sheets?.find(
-            (s) => s.slug === sheetSlug
-          )?.pipelineMappings,
-        });
-      },
+    setImportedData: (data) => {
+      const state = get();
+      const sheetConfig = getCurrentSheetConfig({ ...state, importedData: data });
 
-      setImportedData: (data) => {
+      if (!sheetConfig) {
         set({ importedData: data });
-        const state = get();
-        const currentSheetConfig = state.config.sheets?.find(
-          (sheet) => sheet.slug === state.currentSheet
+        return;
+      }
+
+      let pm = sheetConfig.pipelineMappings;
+
+      if (pm) {
+        const filtered = (pm.fieldMappings || []).filter(
+          (m) => data.headers.includes(m.source)
         );
-
-        if (currentSheetConfig) {
-          let pipelineMappings = currentSheetConfig.pipelineMappings;
-          if (!pipelineMappings) {
-            const autoMapping = generateAutoMapping(
-              data.headers,
-              currentSheetConfig.fields,
-              currentSheetConfig.mappingConfidenceThreshold
-            );
-            set({ mappingState: autoMapping });
-            const fm = mappingStateToFieldMappings(autoMapping).map((m) => {
-              const f = currentSheetConfig.fields.find((x) => x.key === m.target);
-              return f?.defaultTransform
-                ? { ...m, transform: f.defaultTransform }
-                : m;
-            });
-            pipelineMappings = {
-              fieldMappings: fm,
-            };
-          } else {
-            const filtered = (pipelineMappings.fieldMappings || []).filter(
-              (m) => data.headers.includes(m.source)
-            );
-            const seenTargets = new Set<string>();
-            const deduped = filtered.filter((m) => {
-              if (!m.target) return false;
-              if (seenTargets.has(m.target)) return false;
-              seenTargets.add(m.target);
-              return true;
-            });
-            const effective = { ...pipelineMappings, fieldMappings: deduped };
-            set({
-              mappingState: fieldMappingsToMappingState(
-                effective.fieldMappings
-              ),
-            });
-            pipelineMappings = effective;
-          }
-
-          set({
-            pipelineMappings,
-            processedData: [],
-            validationErrors: [],
-            isLoading: false,
-          });
-        }
-      },
-
-      processDataChunked: async () => {
-        const state = get();
-        if (!state.importedData) return;
-        const currentSheetConfig = state.config.sheets?.find(
-          (sheet) => sheet.slug === state.currentSheet
-        );
-        if (!currentSheetConfig) return;
-
-        const rows = state.importedData.rows || [];
-        const fields = currentSheetConfig.fields;
-        const pipeline = state.pipelineMappings;
-        const registry = state.transformRegistry || defaultTransforms;
-        const vRegistry = state.validationRegistry;
-        const runId = ++processingRunId;
-        set({ isLoading: true, processingProgress: 0 });
-        const BATCH =
-          state.config?.processing?.chunkSize && state.config.processing.chunkSize > 0
-            ? state.config.processing.chunkSize
-            : 2000;
-        const processed: DataRow[] = [];
-        const total = rows.length || 1;
-
-        for (let start = 0; start < rows.length; start += BATCH) {
-          if (runId !== processingRunId) {
-            return;
-          }
-          const end = Math.min(rows.length, start + BATCH);
-          for (let index = start; index < end; index++) {
-            if (runId !== processingRunId) return;
-            const row = rows[index];
-            const out: Record<string, any> = {};
-            const errors: ValidationError[] = [];
-            if (pipeline) {
-              for (const m of pipeline.fieldMappings || []) {
-                const { source, target, transform } = m;
-                if (!(source in row) || !target) continue;
-                const field = fields.find((f) => f.key === target);
-                if (!field) continue;
-                let v = row[source];
-                const tName = transform ?? field.defaultTransform;
-                v = applyNamedTransform(v, tName, registry);
-                const coerced = transformValue(v, field.type);
-                out[target] = coerced;
-                errors.push(
-                  ...validateFieldWithRegistry(
-                    coerced,
-                    field,
-                    index,
-                    out,
-                    vRegistry
-                  )
-                );
-              }
-            } else {
-              for (const [sourceColumn, targetField] of Object.entries(
-                state.mappingState
-              )) {
-                if (!targetField || row[sourceColumn] === undefined) continue;
-                const field = fields.find((f) => f.key === targetField);
-                if (!field) continue;
-                let raw = row[sourceColumn];
-                const tName = field.defaultTransform;
-                raw = applyNamedTransform(raw, tName, registry);
-                const coerced = transformValue(raw, field.type);
-                out[targetField] = coerced;
-                errors.push(
-                  ...validateFieldWithRegistry(
-                    coerced,
-                    field,
-                    index,
-                    out,
-                    vRegistry
-                  )
-                );
-              }
-            }
-
-            for (const f of fields) {
-              if (f.required && !(f.key in out)) {
-                errors.push({
-                  row: index,
-                  field: f.key,
-                  message: `${f.label} is required but not mapped`,
-                  severity: "error",
-                });
-              }
-            }
-
-            processed.push({
-              id: `row-${index}`,
-              data: out,
-              errors,
-              isValid:
-                errors.filter((e) => e.severity === "error").length === 0,
-            });
-          }
-          if (runId !== processingRunId) return;
-          set({ processedData: [...processed], processingProgress: Math.min(1, processed.length / total) });
-          await new Promise((r) => setTimeout(r, 0));
-        }
-
-        if (runId !== processingRunId) return;
-        const uniqueFields = fields.filter((f) => f.unique);
-        for (const f of uniqueFields) {
-          const seen = new Map<string, number>();
-          processed.forEach((r, idx) => {
-            const val = r.data[f.key];
-            if (val === undefined || val === null || val === "") return;
-            const key = String(val);
-            if (seen.has(key)) {
-              const first = seen.get(key)!;
-              const push = (rowIdx: number) => {
-                processed[rowIdx].errors.push({
-                  row: rowIdx,
-                  field: f.key,
-                  message: `${f.label} must be unique. Duplicate value '${key}' found`,
-                  severity: "error",
-                });
-                processed[rowIdx].isValid = false;
-              };
-              push(first);
-              push(idx);
-            } else {
-              seen.set(key, idx);
-            }
-          });
-        }
-
-        if (runId !== processingRunId) return;
-        set({ processedData: processed });
-        set({
-          validationErrors: processed.flatMap((r) => r.errors),
-          isLoading: false,
-          processingProgress: 1,
+        const seenTargets = new Set<string>();
+        const deduped = filtered.filter((m) => {
+          if (!m.target) return false;
+          if (seenTargets.has(m.target)) return false;
+          seenTargets.add(m.target);
+          return true;
         });
-      },
-
-      processOnContinue: async () => {
-        const state = get();
-        if (!state.importedData) return;
-        const useChunk = Boolean(
-          state.config?.processing?.chunkSize && state.config.processing.chunkSize > 0
-        );
-        try {
-          if (useChunk) {
-            await get().processDataChunked();
-          } else {
-            set({ isLoading: true });
-            await Promise.resolve().then(() => get().processData());
-            set({ isLoading: false });
-          }
-        } catch (_err) {
-          set({ isLoading: false });
-        }
-      },
-
-      // Cancel any in-flight processing
-      cancelProcessing: () => {
-        // Bump run id so any loop exits
-        processingRunId++;
-        set({ isLoading: false, processingProgress: 0 });
-      },
-
-      clearImportedData: () => {
+        pm = { ...pm, fieldMappings: deduped };
         set({
-          importedData: null,
-          mappingState: {},
+          importedData: data,
+          mappingState: fieldMappingsToMappingState(deduped),
+          pipelineMappings: pm,
           processedData: [],
           validationErrors: [],
+          isLoading: false,
         });
-      },
+        return;
+      }
 
-      setMapping: (mapping) => {
+      set({ importedData: data, isLoading: true });
+
+      computeAutoMappingAsync(
+        data.headers,
+        sheetConfig.fields,
+        sheetConfig.mappingConfidenceThreshold
+      ).then((autoMapping) => {
+        if (get().importedData !== data) return;
+        const fm = mappingStateToFieldMappings(autoMapping).map((m) => {
+          const f = sheetConfig.fields.find((x) => x.key === m.target);
+          return f?.defaultTransform ? { ...m, transform: f.defaultTransform } : m;
+        });
         set({
-          mappingState: mapping,
-          pipelineMappings: {
-            fieldMappings: mappingStateToFieldMappings(mapping),
-          },
+          mappingState: autoMapping,
+          pipelineMappings: { fieldMappings: fm },
+          processedData: [],
+          validationErrors: [],
+          isLoading: false,
         });
-        get().cancelProcessing();
-        set({ processedData: [], validationErrors: [] });
-      },
+      });
+    },
 
-      updateMapping: (sourceColumn, targetField) => {
-        const state = get();
-        const currentSheetConfig = state.config.sheets?.find(
-          (s) => s.slug === state.currentSheet
+    processDataChunked: async () => {
+      const state = get();
+      if (!state.importedData) return;
+      const sheetConfig = getCurrentSheetConfig(state);
+      if (!sheetConfig) return;
+
+      const rows = state.importedData.rows || [];
+      const fields = sheetConfig.fields;
+      const pipeline = state.pipelineMappings;
+      const registry = state.transformRegistry || defaultTransforms;
+      const vRegistry = state.validationRegistry;
+      const fileType = state.importedData.fileType;
+      const runId = ++processingRunId;
+
+      set({ isLoading: true, processingProgress: 0 });
+
+      const BATCH =
+        state.config?.processing?.chunkSize && state.config.processing.chunkSize > 0
+          ? state.config.processing.chunkSize
+          : PROCESSING.DEFAULT_CHUNK_SIZE;
+      const processed: DataRow[] = [];
+      const total = rows.length || 1;
+      let lastProgressUpdate = 0;
+      let lastDataUpdate = 0;
+      const DATA_UPDATE_MS = 500;
+
+      for (let start = 0; start < rows.length; start += BATCH) {
+        if (runId !== processingRunId) return;
+
+        const end = Math.min(rows.length, start + BATCH);
+        const batchRows = rows.slice(start, end);
+
+        const batchResult = processRowBatch(
+          batchRows,
+          start,
+          fields,
+          pipeline,
+          state.mappingState,
+          registry,
+          vRegistry,
+          fileType
         );
-        const newMapping: MappingState = { ...state.mappingState };
-        if (targetField) {
-          for (const [src, tgt] of Object.entries(newMapping)) {
-            if (src !== sourceColumn && tgt === targetField) newMapping[src] = null;
+        for (let i = 0; i < batchResult.length; i++) processed.push(batchResult[i]);
+
+        if (runId !== processingRunId) return;
+
+        const now = Date.now();
+        const isLast = end >= rows.length;
+        if (now - lastProgressUpdate >= PROCESSING.PROGRESS_THROTTLE_MS || isLast) {
+          lastProgressUpdate = now;
+          const progress = Math.min(1, processed.length / total);
+
+          // Full data snapshot only at wider intervals or the final batch
+          // to avoid O(n²) copying on every progress tick.
+          if (now - lastDataUpdate >= DATA_UPDATE_MS || isLast) {
+            lastDataUpdate = now;
+            set({ processedData: processed.slice(), processingProgress: progress });
+          } else {
+            set({ processingProgress: progress });
           }
         }
-        newMapping[sourceColumn] = targetField;
+        await new Promise((r) => setTimeout(r, 0));
+      }
 
-        const existing = state.pipelineMappings?.fieldMappings || [];
-        let next: FieldMapping[] = existing.filter((m) => m.source !== sourceColumn);
-        if (targetField) {
-          next = next.filter((m) => m.target !== targetField);
-          let transform = existing.find((m) => m.source === sourceColumn)?.transform;
-          if (!transform && currentSheetConfig) {
-            const f = currentSheetConfig.fields.find((x) => x.key === targetField);
-            transform = f?.defaultTransform;
-          }
-          next.push({ source: sourceColumn, target: targetField, transform });
-        }
+      if (runId !== processingRunId) return;
 
+      const final = applyUniquenessChecks(processed, fields);
+
+      if (runId !== processingRunId) return;
+      set({
+        processedData: final,
+        validationErrors: extractValidationErrors(final),
+        isLoading: false,
+        processingProgress: 1,
+      });
+    },
+
+    processOnContinue: async () => {
+      const state = get();
+      if (!state.importedData) return;
+      const previousData = state.processedData;
+      const previousErrors = state.validationErrors;
+      try {
+        await get().processDataChunked();
+      } catch (err) {
         set({
-          mappingState: newMapping,
-          pipelineMappings: {
-            ...(state.pipelineMappings || {}),
-            fieldMappings: next,
-          },
+          isLoading: false,
+          processedData: previousData,
+          validationErrors: previousErrors,
+          processingProgress: 0,
         });
-        get().cancelProcessing();
-        set({ processedData: [], validationErrors: [] });
-      },
+        throw err;
+      }
+    },
 
-      setFieldMappings: (fieldMappings) => {
-        const state = get();
-        const byTarget = new Map<string, FieldMapping>();
-        for (const m of fieldMappings || []) {
-          if (!m.target) continue;
-          byTarget.set(m.target, { ...m });
+    cancelProcessing: () => {
+      processingRunId++;
+      set({ isLoading: false, processingProgress: 0 });
+    },
+
+    clearImportedData: () => {
+      set({
+        importedData: null,
+        mappingState: {},
+        processedData: [],
+        validationErrors: [],
+      });
+    },
+
+    setMapping: (mapping) => {
+      processingRunId++;
+      set({
+        mappingState: mapping,
+        pipelineMappings: { fieldMappings: mappingStateToFieldMappings(mapping) },
+        isLoading: false,
+        processingProgress: 0,
+        processedData: [],
+        validationErrors: [],
+      });
+    },
+
+    setMappingBatch: (mapping) => {
+      const state = get();
+      const sheetConfig = getCurrentSheetConfig(state);
+      const fm = mappingStateToFieldMappings(mapping).map((m) => {
+        const f = sheetConfig?.fields.find((x) => x.key === m.target);
+        return f?.defaultTransform ? { ...m, transform: f.defaultTransform } : m;
+      });
+      processingRunId++;
+      set({
+        mappingState: mapping,
+        pipelineMappings: { fieldMappings: fm },
+        processedData: [],
+        validationErrors: [],
+      });
+    },
+
+    updateMapping: (sourceColumn, targetField) => {
+      const state = get();
+      const sheetConfig = getCurrentSheetConfig(state);
+      const newMapping: MappingState = { ...state.mappingState };
+      if (targetField) {
+        for (const [src, tgt] of Object.entries(newMapping)) {
+          if (src !== sourceColumn && tgt === targetField) newMapping[src] = null;
         }
-        const compacted: FieldMapping[] = Array.from(byTarget.values());
-        set({
-          pipelineMappings: {
-            ...(state.pipelineMappings || {}),
-            fieldMappings: compacted,
-          },
-          mappingState: fieldMappingsToMappingState(compacted),
-        });
-        get().cancelProcessing();
-        set({ processedData: [], validationErrors: [] });
-      },
+      }
+      newMapping[sourceColumn] = targetField;
 
-      setTransformRegistry: (registry) => {
-        set({ transformRegistry: registry });
-        get().cancelProcessing();
-        set({ processedData: [], validationErrors: [] });
-      },
-
-      generateAutoMapping: () => {
-        const state = get();
-        if (!state.importedData) return;
-
-        const currentSheetConfig = state.config.sheets?.find(
-          (sheet) => sheet.slug === state.currentSheet
-        );
-
-        if (currentSheetConfig) {
-          const autoMapping = generateAutoMapping(
-            state.importedData.headers,
-            currentSheetConfig.fields,
-            currentSheetConfig.mappingConfidenceThreshold
-          );
-          const fm = mappingStateToFieldMappings(autoMapping).map((m) => {
-            const f = currentSheetConfig.fields.find((x) => x.key === m.target);
-            return f?.defaultTransform ? { ...m, transform: f.defaultTransform } : m;
-          });
-          set({
-            mappingState: autoMapping,
-            pipelineMappings: {
-              fieldMappings: fm,
-            },
-          });
-          get().cancelProcessing();
-          set({ processedData: [], validationErrors: [] });
+      const existing = state.pipelineMappings?.fieldMappings || [];
+      let next: FieldMapping[] = existing.filter((m) => m.source !== sourceColumn);
+      if (targetField) {
+        next = next.filter((m) => m.target !== targetField);
+        let transform = existing.find((m) => m.source === sourceColumn)?.transform;
+        if (!transform && sheetConfig) {
+          const f = sheetConfig.fields.find((x) => x.key === targetField);
+          transform = f?.defaultTransform;
         }
-      },
+        next.push({ source: sourceColumn, target: targetField, transform });
+      }
 
-      processData: () => {
-        const state = get();
-        if (!state.importedData) return;
+      processingRunId++;
+      set({
+        mappingState: newMapping,
+        pipelineMappings: {
+          ...(state.pipelineMappings || {}),
+          fieldMappings: next,
+        },
+        isLoading: false,
+        processingProgress: 0,
+        processedData: [],
+        validationErrors: [],
+      });
+    },
 
-        const currentSheetConfig = state.config.sheets?.find(
-          (sheet) => sheet.slug === state.currentSheet
-        );
+    setFieldMappings: (fieldMappings) => {
+      const state = get();
+      const byTarget = new Map<string, FieldMapping>();
+      for (const m of fieldMappings || []) {
+        if (!m.target) continue;
+        byTarget.set(m.target, { ...m });
+      }
+      const compacted: FieldMapping[] = Array.from(byTarget.values());
+      processingRunId++;
+      set({
+        pipelineMappings: {
+          ...(state.pipelineMappings || {}),
+          fieldMappings: compacted,
+        },
+        mappingState: fieldMappingsToMappingState(compacted),
+        isLoading: false,
+        processingProgress: 0,
+        processedData: [],
+        validationErrors: [],
+      });
+    },
 
-        if (currentSheetConfig) {
-          const processedData = state.pipelineMappings
-            ? processImportedDataWithMappings(
-                state.importedData,
-                currentSheetConfig.fields,
-                state.pipelineMappings,
-                state.transformRegistry || defaultTransforms,
-                state.validationRegistry
-              )
-            : processImportedDataWithMappings(
-                state.importedData,
-                currentSheetConfig.fields,
-                { fieldMappings: mappingStateToFieldMappings(state.mappingState) },
-                state.transformRegistry || defaultTransforms,
-                state.validationRegistry
-              );
-          set({ processedData });
+    updateRowData: (rowId, fieldKey, value) => {
+      const state = get();
+      const sheetConfig = getCurrentSheetConfig(state);
+      if (!sheetConfig) return;
 
-          // Extract validation errors
-          const validationErrors = processedData.flatMap((row) => row.errors);
-          set({ validationErrors });
-        }
-      },
+      const idx = state.processedData.findIndex((r) => r.id === rowId);
+      if (idx === -1) return;
 
-      updateRowData: (rowId, fieldKey, value) => {
-        const state = get();
-        const currentSheetConfig = state.config.sheets?.find(
-          (sheet) => sheet.slug === state.currentSheet
-        );
+      const row = state.processedData[idx];
+      const newData = { ...row.data, [fieldKey]: value };
 
-        if (!currentSheetConfig) return;
-
-        const updatedData = state.processedData.map((row) => {
-          if (row.id === rowId) {
-            const newData = { ...row.data, [fieldKey]: value };
-
-            const field = currentSheetConfig.fields.find(
-              (f) => f.key === fieldKey
-            );
-            const errors = row.errors.filter((e) => e.field !== fieldKey);
-
-            if (field) {
-              const rowIndex = state.processedData.findIndex(
-                (r) => r.id === rowId
-              );
-              const fieldErrors = validateFieldWithRegistry(
-                value,
-                field,
-                rowIndex,
-                newData,
-                state.validationRegistry
-              );
-              errors.push(...fieldErrors);
-            }
-
-            return {
-              ...row,
-              data: newData,
-              errors,
-              isValid:
-                errors.filter((e) => e.severity === "error").length === 0,
-            };
+      // Re-validate ALL fields on this row so cross-field validators
+      // that depend on the changed value are re-evaluated.
+      const errors: ValidationError[] = [];
+      for (const field of sheetConfig.fields) {
+        if (!(field.key in newData)) {
+          if (field.required) {
+            errors.push({
+              row: idx,
+              field: field.key,
+              message: `${field.label} is required but not mapped`,
+              severity: "error",
+            });
           }
-          return row;
-        });
-
-        set({ processedData: updatedData });
-
-        const validationErrors = updatedData.flatMap((row) => row.errors);
-        set({ validationErrors });
-      },
-
-      deleteRow: (rowId) => {
-        const state = get();
-        const updatedData = state.processedData.filter(
-          (row) => row.id !== rowId
+          continue;
+        }
+        const fieldErrors = validateFieldWithRegistry(
+          newData[field.key],
+          field,
+          idx,
+          newData,
+          state.validationRegistry
         );
-        set({ processedData: updatedData });
+        for (let i = 0; i < fieldErrors.length; i++) errors.push(fieldErrors[i]);
+      }
 
-        const validationErrors = updatedData.flatMap((row) => row.errors);
-        set({ validationErrors });
-      },
+      const updatedRow: DataRow = {
+        ...row,
+        data: newData,
+        errors,
+        isValid: errors.filter((e) => e.severity === "error").length === 0,
+      };
 
-      deleteInvalidRows: () => {
-        const state = get();
-        const kept = state.processedData.filter((row) => row.isValid);
-        set({ processedData: kept });
-        const validationErrors = kept.flatMap((row) => row.errors || []);
-        set({ validationErrors });
-      },
+      const updatedData = state.processedData.slice();
+      updatedData[idx] = updatedRow;
 
-      addRow: () => {
-        const state = get();
-        const newRowId = `row-${Date.now()}`;
-        const newRow: DataRow = {
-          id: newRowId,
-          data: {},
-          errors: [],
-          isValid: false,
-        };
+      const final = refreshUniqueness(updatedData, sheetConfig.fields);
+      set({
+        processedData: final,
+        validationErrors: extractValidationErrors(final),
+      });
+    },
 
-        set({ processedData: [...state.processedData, newRow] });
-      },
+    deleteRow: (rowId) => {
+      const state = get();
+      const sheetConfig = getCurrentSheetConfig(state);
+      const filtered = state.processedData.filter((row) => row.id !== rowId);
+      const final = sheetConfig
+        ? refreshUniqueness(filtered, sheetConfig.fields)
+        : filtered;
+      set({
+        processedData: final,
+        validationErrors: extractValidationErrors(final),
+      });
+    },
 
-      setLoading: (loading) => {
-        set({ isLoading: loading });
-      },
+    deleteInvalidRows: () => {
+      const state = get();
+      const sheetConfig = getCurrentSheetConfig(state);
+      const kept = state.processedData.filter((row) => row.isValid);
+      const final = sheetConfig
+        ? refreshUniqueness(kept, sheetConfig.fields)
+        : kept;
+      set({
+        processedData: final,
+        validationErrors: extractValidationErrors(final),
+      });
+    },
 
-      reset: () => {
-        set(initialState);
-      },
+    setLoading: (loading) => {
+      set({ isLoading: loading });
+    },
+
+    reset: () => {
+      processingRunId++;
+      set(initialState);
+    },
   }));
+};

@@ -1,0 +1,45 @@
+/* ── Theme tokens ──────────────────────────────────────────────── */
+.filefeed-workbook {
+  --ff-bg: #ffffff;
+  --ff-bg-surface: #ffffff;
+  --ff-bg-overlay: rgba(255, 255, 255, 0.02);
+  --ff-text: var(--mantine-color-gray-8);
+  --ff-text-muted: var(--mantine-color-gray-5);
+  --ff-border: var(--mantine-color-gray-3);
+  --ff-header-bg: var(--mantine-color-gray-0);
+  --ff-toast-bg: rgba(0, 0, 0, 0.9);
+  --ff-toast-text: #ffffff;
+}
+
+.filefeed-workbook[data-theme="dark"] {
+  --ff-bg: var(--mantine-color-dark-7);
+  --ff-bg-surface: var(--mantine-color-dark-6);
+  --ff-bg-overlay: rgba(0, 0, 0, 0.15);
+  --ff-text: var(--mantine-color-gray-1);
+  --ff-text-muted: var(--mantine-color-gray-5);
+  --ff-border: var(--mantine-color-dark-4);
+  --ff-header-bg: var(--mantine-color-dark-5);
+  --ff-toast-bg: rgba(255, 255, 255, 0.9);
+  --ff-toast-text: #000000;
+}
+
+/* ── Animations ────────────────────────────────────────────────── */
+@keyframes ff-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes ff-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .filefeed-workbook *,
+  .filefeed-workbook *::before,
+  .filefeed-workbook *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

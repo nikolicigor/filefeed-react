@@ -18,9 +18,13 @@
     "README.md",
     "LICENSE"
   ],
-  "sideEffects": true,
+  "sideEffects": ["**/*.css"],
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "build-lib": "tsc -p tsconfig.lib.json && tsc-alias -p tsconfig.lib.json && rollup -c",
     "prepublishOnly": "npm run clean && npm run build-lib"
   },
@@ -44,16 +48,8 @@
   ],
   "author": "Filefeed Team",
   "license": "MIT",
-  "dependencies": {
-    "@mantine/core": "^7.3.0",
-    "@tabler/icons-react": "^3.35.0",
-    "jschardet": "^3.1.4",
-    "papaparse": "^5.4.1",
-    "xlsx": "^0.18.5",
-    "zustand": "^4.4.7"
-  },
+  "dependencies": {},
   "devDependencies": {
-    "@rollup/plugin-alias": "^5.1.0",
     "@rollup/plugin-commonjs": "^25.0.7",
     "@rollup/plugin-node-resolve": "^15.2.3",
     "@rollup/plugin-terser": "^0.4.4",
@@ -62,17 +58,27 @@
     "@types/papaparse": "^5.3.14",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
     "autoprefixer": "^10.4.20",
+    "eslint": "^9.39.3",
+    "eslint-plugin-react-hooks": "^7.0.1",
     "postcss": "^8.4.31",
     "rollup": "^4.0.0",
     "rollup-plugin-postcss": "^4.0.2",
-    "tailwindcss": "^3.3.0",
     "tsc-alias": "^1.8.10",
-    "typescript": "^5.2.0"
+    "typescript": "^5.2.0",
+    "vitest": "^4.0.18"
   },
   "peerDependencies": {
-    "react": ">=17.0.0",
-    "react-dom": ">=17.0.0"
+    "@mantine/core": "^7.3.0",
+    "@tabler/icons-react": "^3.0.0",
+    "jschardet": "^3.0.0",
+    "papaparse": "^5.4.0",
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "xlsx": "^0.18.0",
+    "zustand": "^4.4.0"
   },
   "publishConfig": {
     "access": "public"

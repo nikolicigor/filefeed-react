@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
-import type { FieldConfig } from "../types";
+import { useCallback, useMemo, useRef, useState } from "react";
+import type { FieldConfig, ValidationRegistry } from "../types";
+import { validateFieldWithRegistry } from "../utils/dataProcessing";
 
 export type ManualEntryFilter = "all" | "valid" | "invalid";
 
-interface UseManualEntryReturn {
-  manualEntryData: Record<string, Record<string, any>>;
+export interface UseManualEntryReturn {
+  manualEntryData: Record<string, Record<string, unknown>>;
   manualEntryErrors: Record<string, Record<string, string>>;
   selectedFilter: ManualEntryFilter;
   setSelectedFilter: (f: ManualEntryFilter) => void;
@@ -21,126 +22,55 @@ interface UseManualEntryReturn {
   reset: () => void;
 }
 
-export function useManualEntry(fields?: FieldConfig[]): UseManualEntryReturn {
-  const [manualEntryData, setManualEntryData] = useState<Record<string, Record<string, any>>>({});
+export function useManualEntry(
+  fields?: FieldConfig[],
+  validationRegistry?: ValidationRegistry
+): UseManualEntryReturn {
+  const [manualEntryData, setManualEntryData] = useState<Record<string, Record<string, unknown>>>({});
   const [manualEntryErrors, setManualEntryErrors] = useState<Record<string, Record<string, string>>>({});
   const [selectedFilter, setSelectedFilter] = useState<ManualEntryFilter>("all");
-  const [isCalculatingValidation, setIsCalculatingValidation] = useState(false);
 
-  const validateField = (fieldKey: string, value: any): string | null => {
+  const dataRef = useRef(manualEntryData);
+  dataRef.current = manualEntryData;
+
+  const validateField = useCallback((fieldKey: string, value: unknown, rowIndex: number, rowData: Record<string, unknown>): string | null => {
     if (!fields || fields.length === 0) return null;
     const field = fields.find((f) => f.key === fieldKey);
     if (!field) return null;
 
-    if (field.required && (!value || value.toString().trim() === "")) {
-      return `${field.label} is required`;
-    }
+    const errors = validateFieldWithRegistry(value, field, rowIndex, rowData, validationRegistry);
+    return errors.length > 0 ? errors[0].message : null;
+  }, [fields, validationRegistry]);
 
-    if (!value || value.toString().trim() === "") {
-      return null;
-    }
-
-    switch (field.type) {
-      case "number":
-        if (isNaN(Number(value))) {
-          return `${field.label} must be a valid number`;
-        }
-        break;
-      case "email":
-        // Lightweight email format check
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(value.toString())) {
-          return `${field.label} must be a valid email address`;
-        }
-        break;
-      case "date":
-        if (isNaN(Date.parse(value.toString()))) {
-          return `${field.label} must be a valid date`;
-        }
-        break;
-    }
-
-    if (field.validations) {
-      for (const rule of field.validations) {
-        switch (rule.type) {
-          case "regex":
-            if (rule.value && !new RegExp(rule.value).test(value.toString())) {
-              return rule.message;
-            }
-            break;
-          case "min":
-            if (field.type === "number" && Number(value) < rule.value) {
-              return rule.message;
-            }
-            if (field.type === "string" && value.toString().length < rule.value) {
-              return rule.message;
-            }
-            break;
-          case "max":
-            if (field.type === "number" && Number(value) > rule.value) {
-              return rule.message;
-            }
-            if (field.type === "string" && value.toString().length > rule.value) {
-              return rule.message;
-            }
-            break;
-        }
-      }
-    }
-
-    return null;
-  };
-
-  const handleManualEntryChange = (
+  const handleManualEntryChange = useCallback((
     rowIndex: number,
     fieldKey: string,
     value: string
   ) => {
     const rowId = `manual-${rowIndex}`;
+    const rowData = { ...(dataRef.current[rowId] || {}), [fieldKey]: value };
 
-    // Compute the row data after this change
-    const nextRowData = {
-      ...(manualEntryData[rowId] || {}),
-      [fieldKey]: value,
-    } as Record<string, any>;
+    setManualEntryData((prev) => ({ ...prev, [rowId]: rowData }));
 
-    // Update data state
-    setManualEntryData((prev) => ({
-      ...prev,
-      [rowId]: nextRowData,
-    }));
-
-    // Determine if the entire row is empty (no non-empty values)
-    const rowHasAnyValue = Object.values(nextRowData).some(
-      (v) => v && v.toString().trim() !== ""
-    );
-
-    // Update errors: if row is entirely empty, clear all its errors
-    setManualEntryErrors((prev) => {
+    setManualEntryErrors((prevErrors) => {
+      const rowHasAnyValue = Object.values(rowData).some(
+        (v) => v && v.toString().trim() !== ""
+      );
       if (!rowHasAnyValue) {
-        const next = { ...prev } as Record<string, Record<string, string>>;
+        const next = { ...prevErrors };
         delete next[rowId];
         return next;
       }
-      const fieldError = validateField(fieldKey, value);
+      const fieldError = validateField(fieldKey, value, rowIndex, rowData);
       return {
-        ...prev,
+        ...prevErrors,
         [rowId]: {
-          ...(prev[rowId] || {}),
+          ...(prevErrors[rowId] || {}),
           [fieldKey]: fieldError || "",
         },
       };
     });
-  };
-
-  // Recalculate validation indicator with small debounce
-  useEffect(() => {
-    if (Object.keys(manualEntryData).length > 0) {
-      setIsCalculatingValidation(true);
-      const timer = setTimeout(() => setIsCalculatingValidation(false), 300);
-      return () => clearTimeout(timer);
-    }
-  }, [manualEntryData, manualEntryErrors]);
+  }, [validateField]);
 
   const { totalRows, validRows, invalidRows } = useMemo(() => {
     let total = 0;
@@ -165,7 +95,7 @@ export function useManualEntry(fields?: FieldConfig[]): UseManualEntryReturn {
     return { totalRows: total, validRows: valids, invalidRows: invalids };
   }, [manualEntryData, manualEntryErrors]);
 
-  const isRowVisible = (rowIndex: number): boolean => {
+  const isRowVisible = useCallback((rowIndex: number): boolean => {
     if (selectedFilter === "all") return true;
 
     const rowId = `manual-${rowIndex}`;
@@ -180,21 +110,20 @@ export function useManualEntry(fields?: FieldConfig[]): UseManualEntryReturn {
     if (selectedFilter === "valid") return !hasErrors;
     if (selectedFilter === "invalid") return hasErrors;
     return true;
-  };
+  }, [selectedFilter, manualEntryData, manualEntryErrors]);
 
-  const reset = () => {
+  const reset = useCallback(() => {
     setManualEntryData({});
     setManualEntryErrors({});
     setSelectedFilter("all");
-    setIsCalculatingValidation(false);
-  };
+  }, []);
 
   return {
     manualEntryData,
     manualEntryErrors,
     selectedFilter,
     setSelectedFilter,
-    isCalculatingValidation,
+    isCalculatingValidation: false,
     totalRows,
     validRows,
     invalidRows,

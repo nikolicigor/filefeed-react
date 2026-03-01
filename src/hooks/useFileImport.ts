@@ -1,57 +1,90 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   CreateWorkbookConfig,
-  PipelineMappings,
-  DataRow,
   ImportedData,
 } from "../types";
 
 interface UseFileImportArgs {
-  currentSheet: string;
-  pipelineMappings?: PipelineMappings;
   config: CreateWorkbookConfig;
   onImported: (data: ImportedData) => void;
-  setProcessedRows: (rows: DataRow[]) => void;
-  setLoading: (v: boolean) => void;
-  setActiveTab: (tab: string) => void;
+  onError?: (error: { type: "import"; message: string; originalError?: unknown }) => void;
 }
 
 export function useFileImport({
-  currentSheet,
-  pipelineMappings,
   config,
   onImported,
-  setProcessedRows,
-  setLoading,
-  setActiveTab,
+  onError,
 }: UseFileImportArgs) {
   const [isUploading, setIsUploading] = useState(false);
+  const mountedRef = useRef(true);
+  const onImportedRef = useRef(onImported);
+  const onErrorRef = useRef(onError);
+  onImportedRef.current = onImported;
+  onErrorRef.current = onError;
 
-  const handleFile = async (file: File) => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  const maxFileSize = config?.processing?.maxFileSize;
+  const maxRows = config?.processing?.maxRows;
+
+  const handleFile = useCallback(async (file: File) => {
+    const ext = file.name.toLowerCase();
+    const isCSV = ext.endsWith(".csv");
+    const isExcel = ext.endsWith(".xlsx") || ext.endsWith(".xls");
+
+    if (!isCSV && !isExcel) {
+      onErrorRef.current?.({
+        type: "import",
+        message: "Unsupported file type. Please upload a CSV or Excel file (.csv, .xlsx, .xls)",
+      });
+      return;
+    }
+
+    if (maxFileSize && file.size > maxFileSize) {
+      const sizeMB = (maxFileSize / (1024 * 1024)).toFixed(1);
+      onErrorRef.current?.({
+        type: "import",
+        message: `File exceeds maximum size of ${sizeMB}MB`,
+      });
+      return;
+    }
+
     try {
       setIsUploading(true);
-      const { parseCSV, parseExcel } = await import("../utils/dataProcessing");
-      const data = file.name.toLowerCase().endsWith(".csv")
-        ? await parseCSV(file)
-        : await parseExcel(file);
-      onImported(data);
+      const { parseCSV, parseExcel } = await import("../utils/fileParsing");
+      const data = isCSV ? await parseCSV(file, maxRows) : await parseExcel(file, maxRows);
+      if (mountedRef.current) {
+        onImportedRef.current(data);
+      }
     } catch (error) {
-      console.error("Error processing file:", error);
+      if (mountedRef.current) {
+        onErrorRef.current?.({
+          type: "import",
+          message: error instanceof Error ? error.message : "Failed to import file",
+          originalError: error,
+        });
+      }
     } finally {
-      setIsUploading(false);
+      if (mountedRef.current) {
+        setIsUploading(false);
+      }
     }
-  };
+  }, [maxFileSize, maxRows]);
 
-  const triggerFilePicker = () => {
+  const triggerFilePicker = useCallback(() => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".csv,.xlsx,.xls";
     input.onchange = async (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
       if (file) await handleFile(file);
+      input.onchange = null;
     };
     input.click();
-  };
+  }, [handleFile]);
 
   return { isUploading, triggerFilePicker, handleFile } as const;
 }

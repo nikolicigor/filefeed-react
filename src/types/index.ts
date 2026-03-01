@@ -1,11 +1,13 @@
+export type FieldType = "string" | "number" | "email" | "date" | "boolean" | "phone";
+
 export interface CreateWorkbookConfig {
   name: string;
   labels?: string[];
   namespace?: string;
   spaceId?: string;
   environmentId?: string;
-  metadata?: any;
-  sheets?: SheetConfig[];
+  metadata?: Record<string, unknown>;
+  sheets: SheetConfig[];
   transformRegistry?: TransformRegistry;
   validationRegistry?: ValidationRegistry;
   processing?: ProcessingOptions;
@@ -22,7 +24,7 @@ export interface SheetConfig {
 export interface FieldConfig {
   key: string;
   label: string;
-  type: "string" | "number" | "email" | "date" | "boolean";
+  type: FieldType;
   required?: boolean;
   unique?: boolean;
   validations?: ValidationRule[];
@@ -32,22 +34,26 @@ export interface FieldConfig {
 
 export interface ValidationRule {
   type: "regex" | "min" | "max" | "custom";
-  value?: any;
+  value?: string | number;
   message: string;
   name?: string;
-  args?: any;
+  args?: Record<string, unknown>;
 }
 
 
 export interface ProcessingOptions {
   chunkSize?: number;
+  maxFileSize?: number;
+  maxRows?: number;
 }
+
+export type FileType = "csv" | "excel" | "xlsx" | "xls";
 
 export interface ImportedData {
   headers: string[];
-  rows: Record<string, any>[];
+  rows: Record<string, unknown>[];
   fileName?: string;
-  fileType?: string;
+  fileType?: FileType;
 }
 
 export interface MappingState {
@@ -70,20 +76,18 @@ export interface PipelineMappings {
   };
   fieldMappings: FieldMapping[];
   transformations?: Record<string, string>;
-  validations?: Record<string, any>;
-  [key: string]: any;
+  validations?: Record<string, unknown>;
 }
-export type TransformRegistry = Record<string, (value: any) => any>;
-export type ValidationRegistry = Record<
-  string,
-  (
-    value: any,
-    field: FieldConfig,
-    rowIndex: number,
-    rowData: Record<string, any>,
-    args?: any
-  ) => string | ValidationError | null | undefined | boolean
->;
+export type TransformFn = (value: unknown) => unknown;
+export type TransformRegistry = Record<string, TransformFn>;
+export type ValidationFn = (
+  value: unknown,
+  field: FieldConfig,
+  rowIndex: number,
+  rowData: Record<string, unknown>,
+  args?: Record<string, unknown>
+) => string | ValidationError | null | undefined | false;
+export type ValidationRegistry = Record<string, ValidationFn>;
 
 export interface ValidationError {
   row: number;
@@ -94,7 +98,7 @@ export interface ValidationError {
 
 export interface DataRow {
   id: string;
-  data: Record<string, any>;
+  data: Record<string, unknown>;
   errors: ValidationError[];
   isValid: boolean;
 }
@@ -126,6 +130,7 @@ export interface FilefeedEvents {
   onSubmitComplete?: () => void;
   onStepChange?: (step: "import" | "mapping" | "review") => void;
   onReset?: () => void;
+  onError?: (error: { type: "import" | "processing" | "submit" | "validation"; message: string; originalError?: unknown }) => void;
 }
 export interface FilefeedSDKProps {
   config: CreateWorkbookConfig;
@@ -143,13 +148,11 @@ export interface MappingInterfaceProps {
   importedData?: ImportedData;
   onBack?: () => void;
   onContinue?: () => void;
-  onExit?: () => void;
   fieldMappings?: FieldMapping[];
   onFieldMappingsChange?: (mappings: FieldMapping[]) => void;
   transformRegistry?: TransformRegistry;
   isProcessing?: boolean;
   canContinue?: boolean;
-  processingProgress?: number;
 }
 
 export interface FilefeedWorkbookRef {

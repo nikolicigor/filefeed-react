@@ -1,5 +1,6 @@
-import React, { createContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { createContext, useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { Z_INDEX } from "../constants";
 
 type Ctx = {
   open: boolean;
@@ -10,19 +11,18 @@ type Ctx = {
 
 export const FilefeedContext = createContext<Ctx | null>(null);
 
-export function FilefeedProvider(props: { publishableKey?: string; children: React.ReactNode }) {
+export function FilefeedProvider(props: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(null);
 
-  // Create and own a portal container
   useEffect(() => {
     const el = document.createElement("div");
     el.setAttribute("data-filefeed-portal", "true");
     document.body.appendChild(el);
-    containerRef.current = el;
+    setPortalContainer(el);
     return () => {
       if (el.parentNode) el.parentNode.removeChild(el);
-      containerRef.current = null;
+      setPortalContainer(null);
     };
   }, []);
 
@@ -38,18 +38,21 @@ export function FilefeedProvider(props: { publishableKey?: string; children: Rea
     open,
     openPortal,
     closePortal,
-    portalContainer: containerRef.current,
-  }), [open, openPortal, closePortal]);
+    portalContainer,
+  }), [open, openPortal, closePortal, portalContainer]);
 
   return (
     <FilefeedContext.Provider value={value}>
       {props.children}
-      {/* Consumers render UI into this container via portal when open === true */}
-      {open && containerRef.current
-        ? createPortal(<div id="filefeed-portal-root" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 9999 }} />, containerRef.current)
+      {open && portalContainer
+        ? createPortal(
+            <div
+              id="filefeed-portal-root"
+              style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: Z_INDEX.PORTAL_ROOT }}
+            />,
+            portalContainer
+          )
         : null}
     </FilefeedContext.Provider>
   );
 }
-
-

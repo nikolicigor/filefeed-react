@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import {
   Card,
   Group,
@@ -19,21 +19,137 @@ import {
 } from "@mantine/core";
 import { IconArrowRight, IconFileText, IconAlertCircle } from "@tabler/icons-react";
 import { MappingInterfaceProps, FieldMapping } from "../types";
+import { Z_INDEX, PROCESSING } from "../constants";
 import {
   fieldMappingsToMappingState,
   mappingStateToFieldMappings,
 } from "../utils/dataProcessing";
+
+const mappedSelectInputStyle: React.CSSProperties = {
+  fontSize: "12px",
+  border: "none",
+  backgroundColor: "white",
+  cursor: "pointer",
+};
+
+const unmappedSelectInputStyle: React.CSSProperties = {
+  fontSize: "12px",
+  border: "1px solid var(--mantine-color-gray-4)",
+  backgroundColor: "white",
+  cursor: "pointer",
+};
+
+const transformSelectInputStyle: React.CSSProperties = {
+  fontSize: "12px",
+  backgroundColor: "white",
+  cursor: "pointer",
+};
+
+const mappedSelectStyles = { input: mappedSelectInputStyle } as const;
+const unmappedSelectStyles = { input: unmappedSelectInputStyle } as const;
+const transformSelectStyles = { input: transformSelectInputStyle } as const;
+
+const EMPTY_OPTIONS: { value: string; label: string }[] = [];
+
+const selectComboboxProps = { withinPortal: true, zIndex: Z_INDEX.SELECT_COMBOBOX } as const;
+
+interface MappingHeaderRowProps {
+  header: string;
+  mappedField: string | null;
+  hoveredSource: string | null;
+  selectOptions: { value: string; label: string }[];
+  stableFieldMappings: FieldMapping[];
+  hasRegistry: boolean;
+  transformOptions: { value: string; label: string }[];
+  onMappingUpdate: (source: string, target: string | null) => void;
+  onTransformUpdate: (source: string, transform: string | null) => void;
+  onHoverEnter: (header: string) => void;
+  onHoverLeave: () => void;
+}
+
+const MappingHeaderRow = React.memo(function MappingHeaderRow({
+  header,
+  mappedField,
+  hoveredSource,
+  selectOptions,
+  stableFieldMappings,
+  hasRegistry,
+  transformOptions,
+  onMappingUpdate,
+  onTransformUpdate,
+  onHoverEnter,
+  onHoverLeave,
+}: MappingHeaderRowProps) {
+  const isMapped = !!mappedField;
+  const currentTransform = stableFieldMappings.find((m) => m.source === header)?.transform;
+  const showTransform = isMapped && (hasRegistry || !!currentTransform);
+
+  return (
+    <Card
+      p="sm"
+      radius="md"
+      withBorder
+      style={{
+        backgroundColor:
+          hoveredSource === header
+            ? "var(--mantine-color-gray-0)"
+            : "white",
+        transition: "all 0.2s ease",
+      }}
+      onMouseEnter={() => onHoverEnter(header)}
+      onMouseLeave={onHoverLeave}
+      onFocus={() => onHoverEnter(header)}
+      onBlur={onHoverLeave}
+    >
+      <Flex align="center" style={{ flex: 1 }} gap="md">
+        <Box style={{ flex: 1 }}>
+          <Text size="sm" fw={500} c="gray.8">
+            {header}
+          </Text>
+        </Box>
+
+        <Box>
+          <IconArrowRight size={16} color="gray" />
+        </Box>
+
+        <Box style={{ flex: 1, display: "flex", gap: 8 }}>
+          <Select
+            placeholder="Select field"
+            value={mappedField}
+            onChange={(value) => onMappingUpdate(header, value ?? null)}
+            data={selectOptions}
+            searchable={false}
+            clearable
+            size="xs"
+            comboboxProps={selectComboboxProps}
+            styles={isMapped ? mappedSelectStyles : unmappedSelectStyles}
+          />
+          {showTransform && (
+            <Select
+              placeholder="Transform"
+              value={currentTransform || null}
+              onChange={(value) => onTransformUpdate(header, value === "none" ? null : value)}
+              data={transformOptions}
+              size="xs"
+              clearable
+              comboboxProps={selectComboboxProps}
+              styles={transformSelectStyles}
+            />
+          )}
+        </Box>
+      </Flex>
+    </Card>
+  );
+});
 
 const MappingInterface: React.FC<MappingInterfaceProps> = ({
   importedHeaders,
   fields,
   mapping,
   onMappingChange,
-  confidenceThreshold = 0.7,
   importedData,
   onBack,
   onContinue,
-  onExit,
   fieldMappings,
   onFieldMappingsChange,
   transformRegistry,
@@ -41,20 +157,16 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
   canContinue,
 }) => {
   const [hoveredSource, setHoveredSource] = useState<string | null>(null);
-  const [hoveredTarget, setHoveredTarget] = useState<string | null>(null);
-  const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [draggedSource, setDraggedSource] = useState<string | null>(null);
   const [lastHoveredSource, setLastHoveredSource] = useState<string | null>(null);
   const [missingModalOpen, setMissingModalOpen] = useState(false);
 
-  const handleMappingUpdate = (
+  const handleMappingUpdate = useCallback((
     sourceColumn: string,
     targetField: string | null
   ) => {
-    // Update legacy mapping state
     const newMapping = { ...mapping, [sourceColumn]: targetField };
     onMappingChange(newMapping);
-    // If advanced mapping is used, keep FieldMapping[] in sync
     if (onFieldMappingsChange) {
       const fm: FieldMapping[] = fieldMappings
         ? [...fieldMappings]
@@ -68,9 +180,9 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
       }
       onFieldMappingsChange(fm);
     }
-  };
+  }, [mapping, onMappingChange, fieldMappings, onFieldMappingsChange]);
 
-  const handleTransformUpdate = (
+  const handleTransformUpdate = useCallback((
     sourceColumn: string,
     transformName: string | null
   ) => {
@@ -83,58 +195,109 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
       updated[idx] = { ...updated[idx], transform: t };
       onFieldMappingsChange(updated);
     }
-  };
+  }, [fieldMappings, mapping, onFieldMappingsChange]);
 
-  const handleDragStart = (e: React.DragEvent, sourceColumn: string) => {
+  const handleDragStart = useCallback((e: React.DragEvent, sourceColumn: string) => {
     setDraggedSource(sourceColumn);
     e.dataTransfer.setData("text/plain", sourceColumn);
-  };
+  }, []);
 
-  const handleDragOver = (e: React.DragEvent) => {
+  const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-  };
+  }, []);
 
-  const handleDrop = (e: React.DragEvent, targetField: string) => {
+  const handleDrop = useCallback((e: React.DragEvent, targetField: string) => {
     e.preventDefault();
     const sourceColumn = e.dataTransfer.getData("text/plain");
     if (sourceColumn) {
       handleMappingUpdate(sourceColumn, targetField);
     }
     setDraggedSource(null);
-  };
+  }, [handleMappingUpdate]);
 
-  const handleRemoveMapping = (sourceColumn: string) => {
+  const handleRemoveMapping = useCallback((sourceColumn: string) => {
     handleMappingUpdate(sourceColumn, null);
-  };
+  }, [handleMappingUpdate]);
 
-  const getPreviewData = (sourceColumn: string) => {
+  const getPreviewData = useCallback((sourceColumn: string) => {
     if (!importedData?.rows) return [];
     return importedData.rows
-      .slice(0, 5)
+      .slice(0, PROCESSING.PREVIEW_ROWS)
       .map((row) => row[sourceColumn])
       .filter((val) => val !== undefined && val !== null && val !== "");
-  };
+  }, [importedData?.rows]);
 
-  const incomingFieldsCount = importedHeaders.length;
   const destinationFieldsCount = fields.length;
-  const effectiveMapping = fieldMappings
-    ? fieldMappingsToMappingState(fieldMappings)
-    : mapping;
+  const effectiveMapping = useMemo(
+    () => fieldMappings ? fieldMappingsToMappingState(fieldMappings) : mapping,
+    [fieldMappings, mapping]
+  );
 
-  const mappedCount = Object.values(effectiveMapping).filter(
-    (value) => value !== null
-  ).length;
-  const unmappedSources = importedHeaders.filter(
-    (header) => !effectiveMapping[header]
+  const { mappedCount, usedTargets, availableTargets, missingRequired } = useMemo(() => {
+    const used = Object.values(effectiveMapping).filter(Boolean) as string[];
+    return {
+      mappedCount: used.length,
+      usedTargets: used,
+      availableTargets: fields.filter((field) => !used.includes(field.key)),
+      missingRequired: fields.filter((f) => f.required && !used.includes(f.key)),
+    };
+  }, [effectiveMapping, fields]);
+
+  const selectOptionsPerHeader = useMemo(() => {
+    const result: Record<string, { value: string; label: string }[]> = {};
+    for (const header of importedHeaders) {
+      const mappedField = effectiveMapping[header];
+      const currentTarget = mappedField
+        ? fields.find((f) => f.key === mappedField)
+        : undefined;
+      const options = [
+        ...(currentTarget
+          ? [{ value: currentTarget.key, label: `${currentTarget.label}${currentTarget.required ? " *" : ""}` }]
+          : []),
+        ...availableTargets.map((f) => ({ value: f.key, label: `${f.label}${f.required ? " *" : ""}` })),
+      ];
+      const seen = new Set<string>();
+      result[header] = options.filter((opt) => {
+        if (seen.has(opt.value)) return false;
+        seen.add(opt.value);
+        return true;
+      });
+    }
+    return result;
+  }, [importedHeaders, effectiveMapping, fields, availableTargets]);
+
+  const stableFieldMappings = useMemo(
+    () => fieldMappings || [],
+    [fieldMappings]
   );
-  const mappedSources = importedHeaders.filter(
-    (header) => effectiveMapping[header]
+
+  const activePreviewKey = hoveredSource ?? lastHoveredSource;
+  const previewData = useMemo(
+    () => activePreviewKey ? getPreviewData(activePreviewKey) : [],
+    [activePreviewKey, getPreviewData]
   );
-  const usedTargets = Object.values(effectiveMapping).filter(Boolean);
-  const availableTargets = fields.filter(
-    (field) => !usedTargets.includes(field.key)
+
+  const transformKeys = useMemo(
+    () => Object.keys(transformRegistry || {}),
+    [transformRegistry]
   );
-  const missingRequired = fields.filter((f) => f.required && !usedTargets.includes(f.key));
+  const transformOptions = useMemo(
+    () => [
+      { value: "none", label: "None" },
+      ...transformKeys.map((name) => ({ value: name, label: name })),
+    ],
+    [transformKeys]
+  );
+  const hasRegistry = transformKeys.length > 0;
+
+  const handleHoverEnter = useCallback((header: string) => {
+    setHoveredSource(header);
+    setLastHoveredSource(header);
+  }, []);
+
+  const handleHoverLeave = useCallback(() => {
+    setHoveredSource(null);
+  }, []);
 
   return (
     <Box style={{ padding: "16px", minHeight: "600px" }}>
@@ -164,7 +327,7 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
             color="dark"
             disabled={isProcessing}
             onClick={() => {
-              if (canContinue) onContinue();
+              if (canContinue) onContinue?.();
               else setMissingModalOpen(true);
             }}
           >
@@ -185,7 +348,7 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
           </Group>
         }
         centered
-        zIndex={10050}
+        zIndex={Z_INDEX.MISSING_FIELDS_MODAL}
         overlayProps={{ opacity: 0.45, blur: 2 }}
       >
         <Text size="sm" c="gray.7" mb="xs">
@@ -227,121 +390,22 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
 
             <ScrollArea style={{ height: "440px" }}>
               <Stack gap="xs">
-                {importedHeaders.map((header) => {
-                  const mappedField = effectiveMapping[header];
-                  const targetField = fields.find((f) => f.key === mappedField);
-                  const isMapped = !!mappedField;
-
-                  return (
-                    <Card
-                      key={header}
-                      p="sm"
-                      radius="md"
-                      withBorder
-                      style={{
-                        backgroundColor:
-                          hoveredSource === header
-                            ? "var(--mantine-color-gray-0)"
-                            : "white",
-                        transition: "all 0.2s ease",
-                      }}
-                      onMouseEnter={() => { setHoveredSource(header); setLastHoveredSource(header); }}
-                      onMouseLeave={() => setHoveredSource(null)}
-                    >
-                      <Flex align="center" style={{ flex: 1 }} gap="md">
-                        {/* Left side - Source column (50%) */}
-                        <Box style={{ flex: 1 }}>
-                          <Text size="sm" fw={500} c="gray.8">
-                            {header}
-                          </Text>
-                        </Box>
-
-                        {/* Middle - Arrow */}
-                        <Box>
-                          <IconArrowRight size={16} color="gray" />
-                        </Box>
-
-                        {/* Right side - Destination field (50%) */}
-                        <Box style={{ flex: 1, display: "flex", gap: 8 }}>
-                          <Select
-                            key={`${header}:${mappedField || 'none'}`}
-                            placeholder="Select field"
-                            value={mappedField || null}
-                            onChange={(value) => {
-                              const v = value ?? null;
-                              handleMappingUpdate(header, v);
-                            }}
-                            data={(() => {
-                              const currentTarget = mappedField
-                                ? fields.find((f) => f.key === mappedField)
-                                : undefined;
-                              const options = [
-                                ...(currentTarget
-                                  ? [{ value: currentTarget.key, label: `${currentTarget.label}${currentTarget.required ? " *" : ""}` }]
-                                  : []),
-                                ...availableTargets.map((f) => ({ value: f.key, label: `${f.label}${f.required ? " *" : ""}` })),
-                              ];
-                              // de-duplicate by value while preserving order
-                              return options.filter((opt, idx, arr) =>
-                                arr.findIndex((o) => o.value === opt.value) === idx
-                              );
-                            })()}
-                            searchable={false}
-                            clearable
-                            size="xs"
-                            comboboxProps={{ withinPortal: true, zIndex: 10020 }}
-                            styles={{
-                              input: {
-                                fontSize: "12px",
-                                border: isMapped
-                                  ? "none"
-                                  : "1px solid var(--mantine-color-gray-4)",
-                                backgroundColor: "white",
-                                cursor: "pointer",
-                              },
-                            }}
-                          />
-                          {(() => {
-                            const existingTransform = (fieldMappings || []).find(
-                              (m) => m.source === header
-                            )?.transform;
-                            const hasRegistry = !!transformRegistry && Object.keys(transformRegistry || {}).length > 0;
-                            return isMapped && (hasRegistry || !!existingTransform);
-                          })() && (
-                            <Select
-                              placeholder="Transform"
-                              value={(fieldMappings || []).find((m) => m.source === header)?.transform || null}
-                              onChange={(value) => {
-                                const v = value === "none" ? null : value;
-                                handleTransformUpdate(header, v);
-                              }}
-                              data={(() => {
-                                const keys = Object.keys(transformRegistry || {});
-                                return [
-                                  { value: "none", label: "None" },
-                                  ...keys.map((name) => ({ value: name, label: name })),
-                                ];
-                              })()}
-                              size="xs"
-                              clearable
-                              comboboxProps={{
-                                withinPortal: true,
-                                zIndex: 10020,
-                              }}
-                              styles={{
-                                input: {
-                                  fontSize: "12px",
-                                  backgroundColor: "white",
-                                  cursor: "pointer",
-                                },
-                              }}
-                            />
-                          )}
-                        </Box>
-                      </Flex>
-                    </Card>
-                  );
-                })}
+                {importedHeaders.map((header) => (
+                  <MappingHeaderRow
+                    key={header}
+                    header={header}
+                    mappedField={effectiveMapping[header] || null}
+                    hoveredSource={hoveredSource}
+                    selectOptions={selectOptionsPerHeader[header] || EMPTY_OPTIONS}
+                    stableFieldMappings={stableFieldMappings}
+                    hasRegistry={hasRegistry}
+                    transformOptions={transformOptions}
+                    onMappingUpdate={handleMappingUpdate}
+                    onTransformUpdate={handleTransformUpdate}
+                    onHoverEnter={handleHoverEnter}
+                    onHoverLeave={handleHoverLeave}
+                  />
+                ))}
               </Stack>
             </ScrollArea>
           </Paper>
@@ -355,19 +419,18 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
             </Text>
 
             <Box style={{ height: "440px", overflow: "auto" }}>
-              {(() => { const previewKey = hoveredSource ?? lastHoveredSource; return previewKey; })() ? (
+              {activePreviewKey ? (
                 <Box>
                   <Text size="sm" fw={500} c="gray.7" mb="md">
-                    Column: {(hoveredSource ?? lastHoveredSource) as string}
+                    Column: {activePreviewKey}
                   </Text>
 
-                  {/* Sample Data */}
                   <Stack gap="xs">
                     <Text size="xs" fw={500} c="gray.6" tt="uppercase">
                       Sample Values:
                     </Text>
-                    {getPreviewData((hoveredSource ?? lastHoveredSource) as string)
-                      .slice(0, 10)
+                    {previewData
+                      .slice(0, PROCESSING.PREVIEW_SAMPLE_VALUES)
                       .map((value, index) => (
                         <Box
                           key={index}
@@ -384,7 +447,7 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
                         </Box>
                       ))}
 
-                    {getPreviewData((hoveredSource ?? lastHoveredSource) as string).length === 0 && (
+                    {previewData.length === 0 && (
                       <Text
                         size="sm"
                         c="gray.5"
@@ -394,14 +457,13 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
                       </Text>
                     )}
 
-                    {getPreviewData((hoveredSource ?? lastHoveredSource) as string).length > 10 && (
+                    {previewData.length > PROCESSING.PREVIEW_SAMPLE_VALUES && (
                       <Text
                         size="xs"
                         c="gray.5"
                         style={{ fontStyle: "italic" }}
                       >
-                        ... and {getPreviewData((hoveredSource ?? lastHoveredSource) as string).length - 10} more
-                        rows
+                        ... and {previewData.length - PROCESSING.PREVIEW_SAMPLE_VALUES} more rows
                       </Text>
                     )}
                   </Stack>

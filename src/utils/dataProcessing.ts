@@ -1,6 +1,3 @@
-import Papa from "papaparse";
-import * as XLSX from "xlsx";
-import { detect as detectEncoding } from "jschardet";
 import {
   ImportedData,
   FieldConfig,
@@ -13,137 +10,27 @@ import {
   ValidationRegistry,
 } from "../types";
 
-// File parsing utilities
-export const parseCSV = (file: File): Promise<ImportedData> => {
-  return new Promise((resolve, reject) => {
-    // 1) Detect encoding from a small sample
-    const sampler = new FileReader();
-    sampler.onerror = () => reject(new Error("Failed to read file"));
-    sampler.onload = () => {
-      try {
-        const buffer = sampler.result as ArrayBuffer;
-        const sampleBytes = new Uint8Array(
-          buffer.slice(0, Math.min(buffer.byteLength, 512 * 1024))
-        );
-        let sampleString = "";
-        try {
-          sampleString = new TextDecoder("windows-1252").decode(sampleBytes);
-        } catch {
-          sampleString = Array.from(sampleBytes)
-            .map((c) => String.fromCharCode(c))
-            .join("");
-        }
-        const detection = detectEncoding(sampleString);
-        let encoding = (detection.encoding || "utf-8").toLowerCase();
-        if (!detection.encoding || (detection.confidence || 0) < 0.2) {
-          encoding = "utf-8";
-        }
-
-        // 2) Stream-parse the File with Papa on a Web Worker
-        const rows: Record<string, any>[] = [];
-        let headers: string[] = [];
-        let parseErrors: any[] = [];
-        let headerMap: Map<string, string> | null = null; // original -> normalized
-
-        const config: any = {
-          header: true,
-          skipEmptyLines: true,
-          worker: true,
-          encoding,
-          step: (result: any) => {
-            if (!headers.length && Array.isArray(result.meta?.fields)) {
-              const originalHeaders = (result.meta.fields as string[]) || [];
-              const used = new Set<string>();
-              headerMap = new Map<string, string>();
-              headers = originalHeaders.map((h) => {
-                const base = typeof h === "string" ? h.trim() : String(h || "");
-                let name = base || "";
-                if (used.has(name)) {
-                  let i = 2;
-                  while (used.has(`${name}_${i}`)) i++;
-                  name = `${name}_${i}`;
-                }
-                used.add(name);
-                headerMap!.set(h, name);
-                return name;
-              });
-            }
-            if (result?.data && typeof result.data === "object") {
-              const row = result.data as Record<string, any>;
-              const normalized: Record<string, any> = {};
-              if (headerMap) {
-                for (const [orig, norm] of headerMap.entries()) {
-                  const v = row[orig];
-                  normalized[norm] = typeof v === "string" ? v.trim() : v;
-                }
-              } else {
-                for (const k of Object.keys(row)) {
-                  const v = row[k];
-                  normalized[k] = typeof v === "string" ? v.trim() : v;
-                }
-              }
-              rows.push(normalized);
-            }
-            if (Array.isArray(result.errors) && result.errors.length) {
-              parseErrors = parseErrors.concat(result.errors);
-            }
-          },
-          complete: (_final) => {
-            if (!headers.length && rows.length) {
-              headers = Object.keys(rows[0]);
-            }
-            // If serious errors, reject
-            const serious = parseErrors.find(
-              (e) => e.type !== "FieldMismatch" && e.type !== "Delimiter"
-            );
-            if (serious) {
-              reject(new Error(`CSV parsing error: ${serious.message}`));
-              return;
-            }
-            resolve({
-              headers,
-              rows,
-              fileName: file.name,
-              fileType: "csv",
-            });
-          },
-        };
-        try {
-          Papa.parse(file as any, config);
-        } catch (err) {
-          const fallback: any = { ...config, worker: false };
-          Papa.parse(file as any, fallback);
-        }
-      } catch (err) {
-        reject(err);
-      }
-    };
-    const sampleBlob = file.slice(0, Math.min(file.size, 512 * 1024));
-    sampler.readAsArrayBuffer(sampleBlob);
-  });
-};
-
 // Backend-compatible defaults and helpers (CSV/XLSX lightweight parity)
 export const defaultTransforms: TransformRegistry = {
-  toLowerCase: (v: any) => (v == null ? v : String(v).toLowerCase()),
-  toUpperCase: (v: any) => (v == null ? v : String(v).toUpperCase()),
-  capitalize: (v: any) => {
+  toLowerCase: (v) => (v == null ? v : String(v).toLowerCase()),
+  toUpperCase: (v) => (v == null ? v : String(v).toUpperCase()),
+  capitalize: (v) => {
     if (v == null) return v;
     const s = String(v).toLowerCase();
     return s.replace(/\b\w/g, (c) => c.toUpperCase());
   },
-  trim: (v: any) => (v == null ? v : String(v).trim()),
-  toNumber: (v: any) => (v == null || v === "" ? null : Number(v)),
-  formatPhoneNumber: (v: any) =>
+  trim: (v) => (v == null ? v : String(v).trim()),
+  toNumber: (v) => (v == null || v === "" ? null : Number(v)),
+  formatPhoneNumber: (v) =>
     v == null ? v : String(v).replace(/[^0-9]/g, ""),
-  formatEmail: (v: any) => (v == null ? v : String(v).trim().toLowerCase()),
+  formatEmail: (v) => (v == null ? v : String(v).trim().toLowerCase()),
 };
 
 export const applyNamedTransform = (
-  value: any,
+  value: unknown,
   transformName?: string,
   registry?: TransformRegistry
-): any => {
+): unknown => {
   if (!transformName) return value;
   const fn = registry?.[transformName];
   try {
@@ -198,120 +85,27 @@ export const processImportedDataWithMappings = (
   registry: TransformRegistry = defaultTransforms,
   validationRegistry?: ValidationRegistry
 ): DataRow[] => {
-  const rows: DataRow[] = importedData.rows.map((row, index) => {
-    const processed: Record<string, any> = {};
-    const errors: ValidationError[] = [];
+  const rows = processRowBatch(
+    importedData.rows,
+    0,
+    fields,
+    pipeline,
+    {},
+    registry,
+    validationRegistry,
+    importedData.fileType
+  );
 
-    for (const m of pipeline.fieldMappings || []) {
-      const { source, target, transform } = m;
-      if (!(source in row)) continue;
-      const field = fields.find((f) => f.key === target);
-      if (!field) continue;
-      let v = row[source];
-      const tName = transform ?? field.defaultTransform;
-      v = applyNamedTransform(v, tName, registry);
-      const coerced = transformValue(v, field.type);
-      processed[target] = coerced;
-      errors.push(...validateFieldWithRegistry(coerced, field, index, processed, validationRegistry));
-    }
-
-    for (const f of fields) {
-      if (f.required && !(f.key in processed)) {
-        errors.push({
-          row: index,
-          field: f.key,
-          message: `${f.label} is required but not mapped`,
-          severity: "error",
-        });
-      }
-    }
-
-    return {
-      id: `row-${index}`,
-      data: processed,
-      errors,
-      isValid: errors.filter((e) => e.severity === "error").length === 0,
-    };
-  });
-
-  // Uniqueness across all rows
-  const uniqueFields = fields.filter((f) => f.unique);
-  for (const f of uniqueFields) {
-    const seen = new Map<string, number>();
-    rows.forEach((r, idx) => {
-      const val = r.data[f.key];
-      if (val === undefined || val === null || val === "") return;
-      const key = String(val);
-      if (seen.has(key)) {
-        const first = seen.get(key)!;
-        const push = (rowIdx: number) => {
-          rows[rowIdx].errors.push({
-            row: rowIdx,
-            field: f.key,
-            message: `${f.label} must be unique. Duplicate value '${key}' found`,
-            severity: "error",
-          });
-          rows[rowIdx].isValid = false;
-        };
-        push(first);
-        push(idx);
-      } else {
-        seen.set(key, idx);
-      }
-    });
-  }
-
-  return rows;
+  return applyUniquenessChecks(rows, fields);
 };
 
-export const parseExcel = (file: File): Promise<ImportedData> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.onload = (e) => {
-      try {
-        const data = new Uint8Array(e.target?.result as ArrayBuffer);
-        const workbook = XLSX.read(data, { type: "array" });
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
-        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-
-        if (jsonData.length === 0) {
-          reject(new Error("Empty Excel file"));
-          return;
-        }
-
-        const headers = jsonData[0] as string[];
-        const rows = jsonData.slice(1).map((row: any[]) => {
-          const rowObj: Record<string, any> = {};
-          headers.forEach((header, index) => {
-            rowObj[header] = row[index] || "";
-          });
-          return rowObj;
-        });
-
-        resolve({
-          headers,
-          rows,
-          fileName: file.name,
-          fileType: "excel",
-        });
-      } catch (error) {
-        reject(error);
-      }
-    };
-
-    reader.onerror = () => reject(new Error("Failed to read file"));
-    reader.readAsArrayBuffer(file);
-  });
-};
 
 // Validation utilities
 export const validateFieldWithRegistry = (
-  value: any,
+  value: unknown,
   field: FieldConfig,
   rowIndex: number,
-  rowData: Record<string, any> = {},
+  rowData: Record<string, unknown> = {},
   registry?: ValidationRegistry
 ): ValidationError[] => {
   const errors: ValidationError[] = [];
@@ -361,7 +155,7 @@ export const validateFieldWithRegistry = (
           });
         }
         break;
-      case "boolean":
+      case "boolean": {
         const booleanValues = ["true", "false", "1", "0", "yes", "no"];
         if (!booleanValues.includes(String(value).toLowerCase())) {
           errors.push({
@@ -372,6 +166,19 @@ export const validateFieldWithRegistry = (
           });
         }
         break;
+      }
+      case "phone": {
+        const digits = String(value).replace(/[^0-9]/g, "");
+        if (digits.length < 7 || digits.length > 15) {
+          errors.push({
+            row: rowIndex,
+            field: field.key,
+            message: `${field.label} must be a valid phone number (7-15 digits)`,
+            severity: "error",
+          });
+        }
+        break;
+      }
     }
   }
 
@@ -381,28 +188,37 @@ export const validateFieldWithRegistry = (
       if (validation.type === "custom" && registry && validation.name) {
         const fn = registry[validation.name];
         if (typeof fn === "function") {
-          const res = fn(value, field, rowIndex, rowData, validation.args);
-          if (res === false) {
+          try {
+            const res = fn(value, field, rowIndex, rowData, validation.args as Record<string, unknown>);
+            if (res === false) {
+              errors.push({
+                row: rowIndex,
+                field: field.key,
+                message: validation.message || `${field.label} failed validation`,
+                severity: "error",
+              });
+            } else if (typeof res === "string") {
+              errors.push({
+                row: rowIndex,
+                field: field.key,
+                message: res,
+                severity: "error",
+              });
+            } else if (res && typeof res === "object") {
+              const maybe = res as ValidationError;
+              errors.push({
+                row: maybe.row ?? rowIndex,
+                field: maybe.field ?? field.key,
+                message: maybe.message || validation.message || `${field.label} failed validation`,
+                severity: maybe.severity || "error",
+              });
+            }
+          } catch {
             errors.push({
               row: rowIndex,
               field: field.key,
-              message: validation.message || `${field.label} failed validation`,
+              message: validation.message || `${field.label}: custom validator threw an error`,
               severity: "error",
-            });
-          } else if (typeof res === "string") {
-            errors.push({
-              row: rowIndex,
-              field: field.key,
-              message: res,
-              severity: "error",
-            });
-          } else if (res && typeof res === "object") {
-            const maybe = res as ValidationError;
-            errors.push({
-              row: maybe.row ?? rowIndex,
-              field: maybe.field ?? field.key,
-              message: maybe.message || validation.message || `${field.label} failed validation`,
-              severity: maybe.severity || "error",
             });
           }
           return;
@@ -418,64 +234,83 @@ export const validateFieldWithRegistry = (
   return errors;
 };
 
-// Backwards-compatible wrapper
-export const validateField = (
-  value: any,
-  field: FieldConfig,
-  rowIndex: number
-): ValidationError[] => validateFieldWithRegistry(value, field, rowIndex);
+const REGEX_CACHE_MAX = 200;
+const regexCache = new Map<string, RegExp>();
+function getCachedRegex(pattern: string): RegExp {
+  let re = regexCache.get(pattern);
+  if (!re) {
+    re = new RegExp(pattern);
+    if (regexCache.size >= REGEX_CACHE_MAX) {
+      const oldest = regexCache.keys().next().value;
+      if (oldest !== undefined) regexCache.delete(oldest);
+    }
+    regexCache.set(pattern, re);
+  }
+  return re;
+}
 
 const validateRule = (
-  value: any,
+  value: unknown,
   rule: ValidationRule,
   field: FieldConfig,
   rowIndex: number
 ): ValidationError | null => {
   switch (rule.type) {
     case "regex":
-      if (value && !new RegExp(rule.value).test(String(value))) {
-        return {
-          row: rowIndex,
-          field: field.key,
-          message: rule.message,
-          severity: "error",
-        };
+      if (value && rule.value != null) {
+        try {
+          if (!getCachedRegex(String(rule.value)).test(String(value))) {
+            return {
+              row: rowIndex,
+              field: field.key,
+              message: rule.message,
+              severity: "error",
+            };
+          }
+        } catch {
+          return {
+            row: rowIndex,
+            field: field.key,
+            message: `Invalid regex pattern: ${rule.value}`,
+            severity: "error",
+          };
+        }
       }
       break;
     case "min":
-      if (field.type === "number" && Number(value) < rule.value) {
-        return {
-          row: rowIndex,
-          field: field.key,
-          message: rule.message,
-          severity: "error",
-        };
-      }
-      if (field.type === "string" && String(value).length < rule.value) {
-        return {
-          row: rowIndex,
-          field: field.key,
-          message: rule.message,
-          severity: "error",
-        };
+      if (rule.value != null) {
+        const minVal = Number(rule.value);
+        if (field.type === "number" && Number(value) < minVal) {
+          return { row: rowIndex, field: field.key, message: rule.message, severity: "error" };
+        }
+        if (field.type === "string" && String(value).length < minVal) {
+          return { row: rowIndex, field: field.key, message: rule.message, severity: "error" };
+        }
+        if (field.type === "date" && value) {
+          const dateVal = new Date(String(value)).getTime();
+          const minDate = new Date(String(rule.value)).getTime();
+          if (!isNaN(dateVal) && !isNaN(minDate) && dateVal < minDate) {
+            return { row: rowIndex, field: field.key, message: rule.message, severity: "error" };
+          }
+        }
       }
       break;
     case "max":
-      if (field.type === "number" && Number(value) > rule.value) {
-        return {
-          row: rowIndex,
-          field: field.key,
-          message: rule.message,
-          severity: "error",
-        };
-      }
-      if (field.type === "string" && String(value).length > rule.value) {
-        return {
-          row: rowIndex,
-          field: field.key,
-          message: rule.message,
-          severity: "error",
-        };
+      if (rule.value != null) {
+        const maxVal = Number(rule.value);
+        if (field.type === "number" && Number(value) > maxVal) {
+          return { row: rowIndex, field: field.key, message: rule.message, severity: "error" };
+        }
+        if (field.type === "string" && String(value).length > maxVal) {
+          return { row: rowIndex, field: field.key, message: rule.message, severity: "error" };
+        }
+        if (field.type === "date" && value) {
+          const dateVal = new Date(String(value)).getTime();
+          const maxDate = new Date(String(rule.value)).getTime();
+          if (!isNaN(dateVal) && !isNaN(maxDate) && dateVal > maxDate) {
+            return { row: rowIndex, field: field.key, message: rule.message, severity: "error" };
+          }
+        }
       }
       break;
     case "custom":
@@ -491,7 +326,11 @@ const excelSerialToDate = (serial: number): Date => {
   const ms = Math.round(serial * 86400000);
   return new Date(excelEpoch + ms);
 };
-export const transformValue = (value: any, fieldType: string): any => {
+
+const EXCEL_SERIAL_MIN = 365;
+const EXCEL_SERIAL_MAX = 600000;
+
+export const transformValue = (value: unknown, fieldType: string, sourceFileType?: string): unknown => {
   if (value === null || value === undefined || value === "") {
     return value;
   }
@@ -499,17 +338,24 @@ export const transformValue = (value: any, fieldType: string): any => {
   switch (fieldType) {
     case "string":
       return String(value).trim();
-    case "number":
-      return Number(value);
-    case "boolean":
+    case "number": {
+      const num = Number(value);
+      if (isNaN(num)) return value;
+      return num;
+    }
+    case "boolean": {
       const str = String(value).toLowerCase();
       return str === "true" || str === "1" || str === "yes";
+    }
+    case "phone":
+      return String(value).replace(/[^0-9+\-() ]/g, "").trim();
     case "date":
       if (value instanceof Date) {
         return isNaN(value.getTime()) ? value : value.toISOString();
       }
       if (typeof value === "number") {
-        const maybeExcel = value > 59 && value < 600000;
+        const isExcelSource = sourceFileType === "excel" || sourceFileType === "xlsx" || sourceFileType === "xls";
+        const maybeExcel = isExcelSource && value > EXCEL_SERIAL_MIN && value < EXCEL_SERIAL_MAX;
         const d = maybeExcel ? excelSerialToDate(value) : new Date(value);
         return isNaN(d.getTime()) ? value : d.toISOString();
       }
@@ -525,19 +371,168 @@ export const transformValue = (value: any, fieldType: string): any => {
   }
 };
 
+/**
+ * Process a batch of raw rows into DataRow[] using the given pipeline/mapping.
+ * Shared by both sync and chunked processing paths.
+ */
+export const processRowBatch = (
+  rows: Record<string, unknown>[],
+  startIndex: number,
+  fields: FieldConfig[],
+  pipeline: PipelineMappings | undefined,
+  mappingState: Record<string, string | null>,
+  registry: TransformRegistry = defaultTransforms,
+  validationRegistry?: ValidationRegistry,
+  sourceFileType?: string
+): DataRow[] => {
+  const fieldByKey = new Map<string, FieldConfig>();
+  for (const f of fields) fieldByKey.set(f.key, f);
+
+  return rows.map((row, offset) => {
+    const index = startIndex + offset;
+    const processed: Record<string, unknown> = {};
+    const errors: ValidationError[] = [];
+
+    if (pipeline) {
+      for (const m of pipeline.fieldMappings || []) {
+        const { source, target, transform } = m;
+        if (!(source in row) || !target) continue;
+        const field = fieldByKey.get(target);
+        if (!field) continue;
+        let v: unknown = row[source];
+        const tName = transform ?? field.defaultTransform;
+        v = applyNamedTransform(v, tName, registry);
+        const coerced = transformValue(v, field.type, sourceFileType);
+        processed[target] = coerced;
+        const fieldErrors = validateFieldWithRegistry(coerced, field, index, processed, validationRegistry);
+        for (let i = 0; i < fieldErrors.length; i++) errors.push(fieldErrors[i]);
+      }
+    } else {
+      for (const [sourceColumn, targetField] of Object.entries(mappingState)) {
+        if (!targetField || row[sourceColumn] === undefined) continue;
+        const field = fieldByKey.get(targetField);
+        if (!field) continue;
+        let raw: unknown = row[sourceColumn];
+        const tName = field.defaultTransform;
+        raw = applyNamedTransform(raw, tName, registry);
+        const coerced = transformValue(raw, field.type, sourceFileType);
+        processed[targetField] = coerced;
+        const fieldErrors = validateFieldWithRegistry(coerced, field, index, processed, validationRegistry);
+        for (let i = 0; i < fieldErrors.length; i++) errors.push(fieldErrors[i]);
+      }
+    }
+
+    for (const f of fields) {
+      if (f.required && !(f.key in processed)) {
+        errors.push({
+          row: index,
+          field: f.key,
+          message: `${f.label} is required but not mapped`,
+          severity: "error",
+        });
+      }
+    }
+
+    return {
+      id: `row-${index}`,
+      data: processed,
+      errors,
+      isValid: errors.filter((e) => e.severity === "error").length === 0,
+    };
+  });
+};
+
+/**
+ * Apply uniqueness checks across all processed rows.
+ * Returns a new array with errors appended to duplicate rows.
+ */
+export const applyUniquenessChecks = (rows: DataRow[], fields: FieldConfig[]): DataRow[] => {
+  const uniqueFields = fields.filter((f) => f.unique);
+  if (uniqueFields.length === 0) return rows;
+
+  const result = rows.slice();
+
+  for (const f of uniqueFields) {
+    const seen = new Map<string, number>();
+    const flagged = new Set<number>();
+
+    for (let idx = 0; idx < result.length; idx++) {
+      const val = result[idx].data[f.key];
+      if (val === undefined || val === null || val === "") continue;
+      const key = String(val);
+      if (seen.has(key)) {
+        const first = seen.get(key)!;
+        const addError = (rowIdx: number) => {
+          if (flagged.has(rowIdx)) return;
+          flagged.add(rowIdx);
+          const error: ValidationError = {
+            row: rowIdx,
+            field: f.key,
+            message: `${f.label} must be unique. Duplicate value '${key}' found`,
+            severity: "error",
+          };
+          result[rowIdx] = {
+            ...result[rowIdx],
+            errors: [...result[rowIdx].errors, error],
+            isValid: false,
+          };
+        };
+        addError(first);
+        addError(idx);
+      } else {
+        seen.set(key, idx);
+      }
+    }
+  }
+
+  return result;
+};
+
 // Auto-mapping utilities
-export const generateAutoMapping = (
+
+const calculateSimilarity = (str1: string, str2: string): number => {
+  if (str1 === str2) return 1;
+  const maxLength = Math.max(str1.length, str2.length);
+  if (maxLength === 0) return 1;
+
+  const prevRow = new Uint16Array(str1.length + 1);
+  const currRow = new Uint16Array(str1.length + 1);
+  for (let i = 0; i <= str1.length; i++) prevRow[i] = i;
+
+  for (let j = 1; j <= str2.length; j++) {
+    currRow[0] = j;
+    for (let i = 1; i <= str1.length; i++) {
+      const cost = str1[i - 1] === str2[j - 1] ? 0 : 1;
+      currRow[i] = Math.min(
+        currRow[i - 1] + 1,
+        prevRow[i] + 1,
+        prevRow[i - 1] + cost
+      );
+    }
+    prevRow.set(currRow);
+  }
+
+  return 1 - prevRow[str1.length] / maxLength;
+};
+
+function computeMappingSync(
   importedHeaders: string[],
   fields: FieldConfig[],
-  confidenceThreshold: number = 0.7
-): Record<string, string | null> => {
+  confidenceThreshold: number,
+): Record<string, string | null> {
+  const fieldLower = fields.map((f) => ({
+    key: f.key,
+    label: f.label.toLowerCase(),
+    keyLower: f.key.toLowerCase(),
+  }));
+
   const headerCandidates = importedHeaders.map((header) => {
-    const candidates = fields
-      .map((field) => {
-        const conf =
-          calculateSimilarity(header.toLowerCase(), field.label.toLowerCase()) ||
-          calculateSimilarity(header.toLowerCase(), field.key.toLowerCase());
-        return { key: field.key, confidence: conf };
+    const headerLower = header.toLowerCase();
+    const candidates = fieldLower
+      .map((f) => {
+        const labelConf = calculateSimilarity(headerLower, f.label);
+        const keyConf = calculateSimilarity(headerLower, f.keyLower);
+        return { key: f.key, confidence: Math.max(labelConf, keyConf) };
       })
       .filter((c) => c.confidence > confidenceThreshold)
       .sort((a, b) => b.confidence - a.confidence);
@@ -561,78 +556,73 @@ export const generateAutoMapping = (
   }
 
   return mapping;
+}
+
+const AUTO_MAP_YIELD_THRESHOLD = 80;
+
+export const generateAutoMapping = (
+  importedHeaders: string[],
+  fields: FieldConfig[],
+  confidenceThreshold: number = 0.7
+): Record<string, string | null> => {
+  return computeMappingSync(importedHeaders, fields, confidenceThreshold);
 };
 
-const calculateSimilarity = (str1: string, str2: string): number => {
-  // Simple similarity calculation using Levenshtein distance
-  const matrix = Array(str2.length + 1)
-    .fill(null)
-    .map(() => Array(str1.length + 1).fill(null));
+export const generateAutoMappingAsync = async (
+  importedHeaders: string[],
+  fields: FieldConfig[],
+  confidenceThreshold: number = 0.7
+): Promise<Record<string, string | null>> => {
+  if (importedHeaders.length * fields.length < AUTO_MAP_YIELD_THRESHOLD * AUTO_MAP_YIELD_THRESHOLD) {
+    return computeMappingSync(importedHeaders, fields, confidenceThreshold);
+  }
 
-  for (let i = 0; i <= str1.length; i++) matrix[0][i] = i;
-  for (let j = 0; j <= str2.length; j++) matrix[j][0] = j;
+  const fieldLower = fields.map((f) => ({
+    key: f.key,
+    label: f.label.toLowerCase(),
+    keyLower: f.key.toLowerCase(),
+  }));
 
-  for (let j = 1; j <= str2.length; j++) {
-    for (let i = 1; i <= str1.length; i++) {
-      const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
-      matrix[j][i] = Math.min(
-        matrix[j][i - 1] + 1,
-        matrix[j - 1][i] + 1,
-        matrix[j - 1][i - 1] + indicator
-      );
+  type Candidate = { key: string; confidence: number };
+  const headerCandidates: { header: string; candidates: Candidate[]; best: number }[] = [];
+
+  const BATCH = 50;
+  for (let start = 0; start < importedHeaders.length; start += BATCH) {
+    const end = Math.min(importedHeaders.length, start + BATCH);
+    for (let h = start; h < end; h++) {
+      const header = importedHeaders[h];
+      const headerLower = header.toLowerCase();
+      const candidates = fieldLower
+        .map((f) => {
+          const labelConf = calculateSimilarity(headerLower, f.label);
+          const keyConf = calculateSimilarity(headerLower, f.keyLower);
+          return { key: f.key, confidence: Math.max(labelConf, keyConf) };
+        })
+        .filter((c) => c.confidence > confidenceThreshold)
+        .sort((a, b) => b.confidence - a.confidence);
+      const best = candidates[0]?.confidence || 0;
+      headerCandidates.push({ header, candidates, best });
+    }
+    if (end < importedHeaders.length) {
+      await new Promise<void>((r) => setTimeout(r, 0));
     }
   }
 
-  const distance = matrix[str2.length][str1.length];
-  const maxLength = Math.max(str1.length, str2.length);
-  return maxLength === 0 ? 1 : 1 - distance / maxLength;
+  headerCandidates.sort((a, b) => b.best - a.best);
+
+  const usedTargets = new Set<string>();
+  const mapping: Record<string, string | null> = {};
+
+  for (const item of headerCandidates) {
+    const pick = item.candidates.find((c) => !usedTargets.has(c.key));
+    if (pick) {
+      mapping[item.header] = pick.key;
+      usedTargets.add(pick.key);
+    } else {
+      mapping[item.header] = null;
+    }
+  }
+
+  return mapping;
 };
 
-// Process imported data with mapping and validation
-export const processImportedData = (
-  importedData: ImportedData,
-  fields: FieldConfig[],
-  mapping: Record<string, string | null>
-): DataRow[] => {
-  return importedData.rows.map((row, index) => {
-    const processedRow: Record<string, any> = {};
-    const errors: ValidationError[] = [];
-
-    // Apply mapping and transformation
-    Object.entries(mapping).forEach(([sourceColumn, targetField]) => {
-      if (targetField && row[sourceColumn] !== undefined) {
-        const field = fields.find((f) => f.key === targetField);
-        if (field) {
-          const transformedValue = transformValue(
-            row[sourceColumn],
-            field.type
-          );
-          processedRow[targetField] = transformedValue;
-
-          // Validate the field
-          const fieldErrors = validateField(transformedValue, field, index);
-          errors.push(...fieldErrors);
-        }
-      }
-    });
-
-    // Check for missing required fields
-    fields.forEach((field) => {
-      if (field.required && !(field.key in processedRow)) {
-        errors.push({
-          row: index,
-          field: field.key,
-          message: `${field.label} is required but not mapped`,
-          severity: "error",
-        });
-      }
-    });
-
-    return {
-      id: `row-${index}`,
-      data: processedRow,
-      errors,
-      isValid: errors.filter((e) => e.severity === "error").length === 0,
-    };
-  });
-};

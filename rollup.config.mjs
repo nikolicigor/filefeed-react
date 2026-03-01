@@ -13,15 +13,15 @@ export default {
     {
       file: pkg.main,
       format: 'cjs',
-      sourcemap: false,
+      sourcemap: true,
       exports: 'named',
-      intro: '"use client";',
+      inlineDynamicImports: true,
     },
     {
       file: pkg.module || 'dist/index.esm.js',
       format: 'esm',
-      sourcemap: false,
-      intro: '"use client";',
+      sourcemap: true,
+      inlineDynamicImports: true,
     },
   ],
   external: [

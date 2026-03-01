@@ -1,5 +1,6 @@
 import { useContext, useSyncExternalStore } from "react";
 import { FilefeedContext } from "../provider/FilefeedProvider";
+import type { GlobalPortalState } from "../provider/globalPortal";
 import {
   subscribe as subscribeGlobal,
   getSnapshot as getGlobalSnapshot,
@@ -8,15 +9,21 @@ import {
   getServerSnapshot as getGlobalServerSnapshot,
 } from "../provider/globalPortal";
 
+const NOOP_SUBSCRIBE = () => () => {};
+const EMPTY_SNAPSHOT: GlobalPortalState = { open: false, portalContainer: null };
+const getEmptySnapshot = () => EMPTY_SNAPSHOT;
+
 export function useFilefeed() {
   const ctx = useContext(FilefeedContext);
-  if (ctx) return ctx;
+  const hasCtx = ctx !== null;
 
   const snapshot = useSyncExternalStore(
-    subscribeGlobal,
-    getGlobalSnapshot,
-    getGlobalServerSnapshot
+    hasCtx ? NOOP_SUBSCRIBE : subscribeGlobal,
+    hasCtx ? getEmptySnapshot : getGlobalSnapshot,
+    hasCtx ? getEmptySnapshot : getGlobalServerSnapshot
   );
+
+  if (ctx) return ctx;
 
   return {
     open: snapshot.open,
@@ -25,5 +32,3 @@ export function useFilefeed() {
     portalContainer: snapshot.portalContainer,
   } as const;
 }
-
-

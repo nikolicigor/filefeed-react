@@ -1,9 +1,12 @@
+import type { FieldType as BaseFieldType } from "./index";
+
 export namespace Filefeed {
-  export type FieldType = "string" | "number" | "email" | "date" | "boolean";
+  export type FieldType = BaseFieldType;
 
   export type Field = {
     key: string;
-    type: FieldType; // "string" | "number" | "email" | ...
+    type: FieldType;
+    /** Display label. Falls back to `key` when omitted via FilefeedSheet. */
     label?: string;
     required?: boolean;
     unique?: boolean;
@@ -12,7 +15,7 @@ export namespace Filefeed {
   export type SheetConfig = {
     name: string;
     slug: string;
-    fields: Field[];
+    fields: readonly Field[];
   };
 
   export type RecordAPI = {

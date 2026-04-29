@@ -1,4 +1,4 @@
-export type FieldType = "string" | "number" | "email" | "date" | "boolean" | "phone";
+export type FieldType = "string" | "number" | "email" | "date" | "boolean" | "phone" | "enum";
 
 export interface CreateWorkbookConfig {
   name: string;
@@ -11,6 +11,21 @@ export interface CreateWorkbookConfig {
   transformRegistry?: TransformRegistry;
   validationRegistry?: ValidationRegistry;
   processing?: ProcessingOptions;
+  /**
+   * Optional URL the SDK can POST to in order to obtain AI-driven value
+   * mapping suggestions. Receives `{ buckets: BucketRequest[] }`, expects
+   * `{ results: [{ fieldKey, mappings: [{ source, target, confidence }] }] }`.
+   * Falls back silently to the local synonym/fuzzy strategy if the endpoint
+   * is unset or fails.
+   */
+  aiSuggestEndpoint?: string;
+  /**
+   * Optional URL the SDK can POST to for AI-driven column-mapping fallback.
+   * Called after local fuzzy matching, with the unmatched headers and the
+   * full target schema; the response is merged into the existing mapping
+   * state. Falls back silently if unset or if the request fails.
+   */
+  aiColumnSuggestEndpoint?: string;
 }
 
 export interface SheetConfig {
@@ -30,6 +45,16 @@ export interface FieldConfig {
   validations?: ValidationRule[];
   description?: string;
   defaultTransform?: string;
+  enum?: string[];
+  format?: NumberFormat | DateFormat;
+}
+
+export interface NumberFormat {
+  digits?: number;
+}
+
+export interface DateFormat {
+  output?: string;
 }
 
 export interface ValidationRule {
@@ -45,6 +70,14 @@ export interface ProcessingOptions {
   chunkSize?: number;
   maxFileSize?: number;
   maxRows?: number;
+  autoDetectMetadataRow?: boolean;
+  skipRows?: number[];
+  dateOutputFormat?: string;
+}
+
+export interface MetadataRowInfo {
+  rowIndex: number;
+  hints: Record<string, string>;
 }
 
 export type FileType = "csv" | "excel" | "xlsx" | "xls";
@@ -54,6 +87,7 @@ export interface ImportedData {
   rows: Record<string, unknown>[];
   fileName?: string;
   fileType?: FileType;
+  metadataRow?: MetadataRowInfo;
 }
 
 export interface MappingState {
@@ -65,6 +99,7 @@ export interface FieldMapping {
   target: string;
   transform?: string;
   confidence?: number;
+  valueMappings?: Record<string, string>;
 }
 
 export interface PipelineMappings {
@@ -115,6 +150,7 @@ export interface WorkbookState {
   transformRegistry?: TransformRegistry;
   validationRegistry?: ValidationRegistry;
   processingProgress?: number;
+  valueMappings?: Record<string, Record<string, string>>;
 }
 export interface FilefeedEvents {
   onDataImported?: (data: ImportedData) => void;
@@ -128,7 +164,8 @@ export interface FilefeedEvents {
   }) => void | Promise<void>;
   onSubmitStart?: () => void;
   onSubmitComplete?: () => void;
-  onStepChange?: (step: "import" | "mapping" | "review") => void;
+  onStepChange?: (step: "import" | "mapping" | "values" | "review") => void;
+  onMetadataRowDetected?: (info: MetadataRowInfo) => void;
   onReset?: () => void;
   onError?: (error: { type: "import" | "processing" | "submit" | "validation"; message: string; originalError?: unknown }) => void;
 }

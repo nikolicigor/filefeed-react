@@ -117,7 +117,6 @@ const FilefeedWorkbookInner = forwardRef<FilefeedWorkbookRef, InnerProps>(
     const pipelineMappings = useStore(store, (s) => s.pipelineMappings);
     const transformRegistry = useStore(store, (s) => s.transformRegistry);
     const validationRegistry = useStore(store, (s) => s.validationRegistry);
-
     // ── Store: stable action references (zustand actions never change) ──
     const {
       setConfig,
@@ -198,6 +197,9 @@ const FilefeedWorkbookInner = forwardRef<FilefeedWorkbookRef, InnerProps>(
           resetManual();
         }
         eventsRef.current?.onDataImported?.(data);
+        if (data.metadataRow) {
+          eventsRef.current?.onMetadataRowDetected?.(data.metadataRow);
+        }
       },
       onError: (err) => eventsRef.current?.onError?.(err),
     });
@@ -220,6 +222,81 @@ const FilefeedWorkbookInner = forwardRef<FilefeedWorkbookRef, InnerProps>(
       },
       [setMappingBatch]
     );
+
+    // ── AI column-mapping fallback ───────────────────────────────────
+    // Once the local fuzzy auto-mapping has run on a fresh import, ask the
+    // configured endpoint to fill in any unmatched headers. The endpoint sees
+    // the full schema plus the headers we couldn't place, and we merge any
+    // confident replies (≥ 0.7) into the existing mapping state.
+    const aiColumnEndpoint = config?.aiColumnSuggestEndpoint;
+    const aiColumnAttemptedRef = useRef<string | null>(null);
+
+    useEffect(() => {
+      if (!aiColumnEndpoint) return;
+      if (!importedData || !currentSheetConfig) return;
+      if (isLoading) return;
+
+      const sig = `${importedData.fileName ?? ""}::${importedData.headers.join("|")}`;
+      if (aiColumnAttemptedRef.current === sig) return;
+
+      const unmatched = importedData.headers.filter(
+        (h) => !mappingState[h]
+      );
+      if (unmatched.length === 0) {
+        aiColumnAttemptedRef.current = sig;
+        return;
+      }
+      aiColumnAttemptedRef.current = sig;
+
+      let cancelled = false;
+      (async () => {
+        try {
+          const res = await fetch(aiColumnEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              headers: unmatched,
+              fields: currentSheetConfig.fields.map((f) => ({
+                key: f.key,
+                label: f.label,
+                type: f.type,
+                required: f.required,
+                enum: f.enum,
+              })),
+              existingMappings: mappingState,
+            }),
+          });
+          if (!res.ok || cancelled) return;
+          const data = (await res.json()) as {
+            mappings?: Array<{ source: string; target: string | null; confidence: number }>;
+          };
+          if (cancelled || !Array.isArray(data.mappings)) return;
+
+          const usedTargets = new Set(
+            Object.values(mappingState).filter(Boolean) as string[]
+          );
+          const merged: Record<string, string | null> = { ...mappingState };
+          for (const m of data.mappings) {
+            if (!m.target) continue;
+            if (m.confidence < 0.7) continue;
+            if (usedTargets.has(m.target)) continue;
+            if (merged[m.source]) continue;
+            merged[m.source] = m.target;
+            usedTargets.add(m.target);
+          }
+          if (cancelled) return;
+          setMappingBatch(merged);
+        } catch (err) {
+          if (typeof console !== "undefined") {
+            console.warn("[FilefeedWorkbook] AI column mapping failed; keeping local mapping.", err);
+          }
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
+    }, [aiColumnEndpoint, importedData, currentSheetConfig, mappingState, isLoading, setMappingBatch]);
 
     const canProceedToReview = useMemo(() => {
       if (!currentSheetConfig) return false;

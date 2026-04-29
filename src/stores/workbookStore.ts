@@ -19,6 +19,7 @@ import {
   fieldMappingsToMappingState,
   defaultTransforms,
   validateFieldWithRegistry,
+  detectAllCapsField,
 } from "../utils/dataProcessing";
 import { PROCESSING } from "../constants";
 
@@ -32,6 +33,8 @@ interface WorkbookActions {
   setMappingBatch: (mapping: MappingState) => void;
   updateMapping: (sourceColumn: string, targetField: string | null) => void;
   setFieldMappings: (fieldMappings: FieldMapping[]) => void;
+  setValueMappings: (valueMappings: Record<string, Record<string, string>>) => void;
+  bulkApplyValueMappings: (perFieldMappings: Record<string, Record<string, string>>) => void;
 
   processDataChunked: () => Promise<void>;
   processOnContinue: () => Promise<void>;
@@ -63,6 +66,7 @@ const initialState: WorkbookState = {
   pipelineMappings: undefined,
   transformRegistry: defaultTransforms,
   validationRegistry: undefined,
+  valueMappings: {},
 };
 
 function getCurrentSheetConfig(state: WorkbookState): SheetConfig | undefined {
@@ -174,7 +178,12 @@ export const createWorkbookStore = (): StoreApi<WorkbookStore> => {
         if (get().importedData !== data) return;
         const fm = mappingStateToFieldMappings(autoMapping).map((m) => {
           const f = sheetConfig.fields.find((x) => x.key === m.target);
-          return f?.defaultTransform ? { ...m, transform: f.defaultTransform } : m;
+          let transform = f?.defaultTransform;
+          if (!transform && f && (f.type === "string" || f.type === "enum")) {
+            const samples = data.rows.slice(0, 50).map((r) => r[m.source]);
+            if (detectAllCapsField(samples)) transform = "capitalize";
+          }
+          return transform ? { ...m, transform } : m;
         });
         set({
           mappingState: autoMapping,
@@ -226,7 +235,8 @@ export const createWorkbookStore = (): StoreApi<WorkbookStore> => {
           state.mappingState,
           registry,
           vRegistry,
-          fileType
+          fileType,
+          { dateOutputFormat: state.config?.processing?.dateOutputFormat }
         );
         for (let i = 0; i < batchResult.length; i++) processed.push(batchResult[i]);
 
@@ -379,6 +389,114 @@ export const createWorkbookStore = (): StoreApi<WorkbookStore> => {
         processingProgress: 0,
         processedData: [],
         validationErrors: [],
+      });
+    },
+
+    setValueMappings: (valueMappings) => {
+      const state = get();
+      const existing = state.pipelineMappings?.fieldMappings || [];
+      const stamped = existing.map((m) => {
+        const vm = valueMappings[m.target];
+        if (!vm || Object.keys(vm).length === 0) {
+          if (m.valueMappings) {
+            const { valueMappings: _omit, ...rest } = m;
+            return rest as FieldMapping;
+          }
+          return m;
+        }
+        return { ...m, valueMappings: { ...vm } };
+      });
+      processingRunId++;
+      set({
+        valueMappings: { ...valueMappings },
+        pipelineMappings: {
+          ...(state.pipelineMappings || {}),
+          fieldMappings: stamped,
+        },
+        processedData: [],
+        validationErrors: [],
+      });
+    },
+
+    bulkApplyValueMappings: (perFieldMappings) => {
+      const state = get();
+      const sheetConfig = getCurrentSheetConfig(state);
+      if (!sheetConfig) return;
+      const fields = sheetConfig.fields;
+
+      // Pre-build lower-case lookup tables to avoid repeated normalisation
+      // when mapping is applied to thousands of rows.
+      const lowerLookup: Record<string, Map<string, string>> = {};
+      for (const [fieldKey, mappings] of Object.entries(perFieldMappings)) {
+        if (!mappings || Object.keys(mappings).length === 0) continue;
+        const m = new Map<string, string>();
+        for (const [src, tgt] of Object.entries(mappings)) {
+          if (src && tgt) m.set(src.toLowerCase(), tgt);
+        }
+        if (m.size > 0) lowerLookup[fieldKey] = m;
+      }
+      if (Object.keys(lowerLookup).length === 0) return;
+
+      const updated = state.processedData.map((row, idx) => {
+        const newData = { ...row.data };
+        let changed = false;
+        for (const fieldKey of Object.keys(lowerLookup)) {
+          const v = newData[fieldKey];
+          if (v == null || v === "") continue;
+          const key = String(v).trim().toLowerCase();
+          const tgt = lowerLookup[fieldKey].get(key);
+          if (tgt && tgt !== newData[fieldKey]) {
+            newData[fieldKey] = tgt;
+            changed = true;
+          }
+        }
+        if (!changed) return row;
+        const errors: ValidationError[] = [];
+        for (const field of fields) {
+          if (!(field.key in newData)) {
+            if (field.required) {
+              errors.push({
+                row: idx,
+                field: field.key,
+                message: `${field.label} is required but not mapped`,
+                severity: "error",
+              });
+            }
+            continue;
+          }
+          const fieldErrors = validateFieldWithRegistry(
+            newData[field.key],
+            field,
+            idx,
+            newData,
+            state.validationRegistry
+          );
+          for (let i = 0; i < fieldErrors.length; i++) errors.push(fieldErrors[i]);
+        }
+        return {
+          ...row,
+          data: newData,
+          errors,
+          isValid: errors.filter((e) => e.severity === "error").length === 0,
+        };
+      });
+
+      // Merge into existing valueMappings so future re-imports keep these fixes
+      const mergedValueMappings: Record<string, Record<string, string>> = {
+        ...(state.valueMappings || {}),
+      };
+      for (const [fieldKey, mappings] of Object.entries(perFieldMappings)) {
+        mergedValueMappings[fieldKey] = {
+          ...(mergedValueMappings[fieldKey] || {}),
+          ...mappings,
+        };
+      }
+
+      const final = applyUniquenessChecks(updated, fields);
+      set({
+        processedData: final,
+        validationErrors: extractValidationErrors(final),
+        valueMappings: mergedValueMappings,
       });
     },
 

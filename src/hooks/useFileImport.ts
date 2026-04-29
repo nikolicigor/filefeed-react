@@ -29,6 +29,8 @@ export function useFileImport({
 
   const maxFileSize = config?.processing?.maxFileSize;
   const maxRows = config?.processing?.maxRows;
+  const autoDetectMetadataRow = config?.processing?.autoDetectMetadataRow;
+  const skipRows = config?.processing?.skipRows;
 
   const handleFile = useCallback(async (file: File) => {
     const ext = file.name.toLowerCase();
@@ -55,7 +57,10 @@ export function useFileImport({
     try {
       setIsUploading(true);
       const { parseCSV, parseExcel } = await import("../utils/fileParsing");
-      const data = isCSV ? await parseCSV(file, maxRows) : await parseExcel(file, maxRows);
+      const parseOptions = { autoDetectMetadataRow, skipRows };
+      const data = isCSV
+        ? await parseCSV(file, maxRows, parseOptions)
+        : await parseExcel(file, maxRows, parseOptions);
       if (mountedRef.current) {
         onImportedRef.current(data);
       }
@@ -72,7 +77,7 @@ export function useFileImport({
         setIsUploading(false);
       }
     }
-  }, [maxFileSize, maxRows]);
+  }, [maxFileSize, maxRows, autoDetectMetadataRow, skipRows]);
 
   const triggerFilePicker = useCallback(() => {
     const input = document.createElement("input");

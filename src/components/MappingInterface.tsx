@@ -23,6 +23,8 @@ import { Z_INDEX, PROCESSING } from "../constants";
 import {
   fieldMappingsToMappingState,
   mappingStateToFieldMappings,
+  transformLabel,
+  transformExample,
 } from "../utils/dataProcessing";
 
 const mappedSelectInputStyle: React.CSSProperties = {
@@ -101,32 +103,33 @@ const MappingHeaderRow = React.memo(function MappingHeaderRow({
       onFocus={() => onHoverEnter(header)}
       onBlur={onHoverLeave}
     >
-      <Flex align="center" style={{ flex: 1 }} gap="md">
-        <Box style={{ flex: 1 }}>
-          <Text size="sm" fw={500} c="gray.8">
+      <Flex align="center" gap="sm" style={{ width: "100%" }}>
+        <Box style={{ flex: "0 0 30%", minWidth: 0 }}>
+          <Text size="sm" fw={500} c="gray.8" truncate title={header}>
             {header}
           </Text>
         </Box>
 
-        <Box>
-          <IconArrowRight size={16} color="gray" />
+        <Box style={{ flex: "0 0 16px", color: "var(--mantine-color-gray-5)" }}>
+          <IconArrowRight size={16} />
         </Box>
 
-        <Box style={{ flex: 1, display: "flex", gap: 8 }}>
+        <Box style={{ flex: 1, display: "flex", gap: 8, minWidth: 0 }}>
           <Select
-            placeholder="Select field"
+            placeholder="Select target field"
             value={mappedField}
             onChange={(value) => onMappingUpdate(header, value ?? null)}
             data={selectOptions}
-            searchable={false}
+            searchable
             clearable
             size="xs"
             comboboxProps={selectComboboxProps}
             styles={isMapped ? mappedSelectStyles : unmappedSelectStyles}
+            style={{ flex: "1.6 1 0", minWidth: 0 }}
           />
-          {showTransform && (
+          {showTransform ? (
             <Select
-              placeholder="Transform"
+              placeholder="No transform"
               value={currentTransform || null}
               onChange={(value) => onTransformUpdate(header, value === "none" ? null : value)}
               data={transformOptions}
@@ -134,7 +137,34 @@ const MappingHeaderRow = React.memo(function MappingHeaderRow({
               clearable
               comboboxProps={selectComboboxProps}
               styles={transformSelectStyles}
+              style={{ flex: "1 1 0", minWidth: 0 }}
+              renderOption={({ option }) => {
+                const example = option.value !== "none" ? transformExample(option.value) : undefined;
+                return (
+                  <Box style={{ minWidth: 0 }}>
+                    <Text size="xs" fw={500} c="gray.8">
+                      {option.label}
+                    </Text>
+                    {example && (
+                      <Text
+                        size="xs"
+                        c="dimmed"
+                        mt={2}
+                        style={{
+                          fontFamily:
+                            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                          fontSize: 10.5,
+                        }}
+                      >
+                        {example}
+                      </Text>
+                    )}
+                  </Box>
+                );
+              }}
             />
+          ) : (
+            <Box style={{ flex: "1 1 0", minWidth: 0 }} aria-hidden="true" />
           )}
         </Box>
       </Flex>
@@ -259,8 +289,8 @@ const MappingInterface: React.FC<MappingInterfaceProps> = ({
   );
   const transformOptions = useMemo(
     () => [
-      { value: "none", label: "None" },
-      ...transformKeys.map((name) => ({ value: name, label: name })),
+      { value: "none", label: "No transform" },
+      ...transformKeys.map((name) => ({ value: name, label: transformLabel(name) })),
     ],
     [transformKeys]
   );

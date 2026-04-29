@@ -17,6 +17,7 @@ export namespace Filefeed {
     name: string;
     slug: string;
     fields: readonly Field[];
+    mappingConfidenceThreshold?: number;
   };
 
   export type RecordAPI = {

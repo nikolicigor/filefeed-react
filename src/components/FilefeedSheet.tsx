@@ -16,6 +16,10 @@ type Props<S extends Filefeed.SheetConfig> = {
   autoCloseOnComplete?: boolean;
   processing?: ProcessingOptions;
   theme?: "light" | "dark";
+  /** Optional URL the SDK can POST to for AI-powered value mapping suggestions. */
+  aiSuggestEndpoint?: string;
+  /** Optional URL the SDK can POST to for AI-powered column mapping fallback. */
+  aiColumnSuggestEndpoint?: string;
   /** @deprecated Use `processing` instead */
   importOptions?: ProcessingOptions;
 };
@@ -54,6 +58,8 @@ export function FilefeedSheet<S extends Filefeed.SheetConfig>({
   autoCloseOnComplete = true,
   processing,
   theme,
+  aiSuggestEndpoint,
+  aiColumnSuggestEndpoint,
   importOptions,
 }: Props<S>) {
   const { open, portalContainer, closePortal } = useFilefeed();
@@ -67,10 +73,15 @@ export function FilefeedSheet<S extends Filefeed.SheetConfig>({
         name: config.name,
         slug: config.slug,
         fields: config.fields.map((f) => ({ label: f.key, ...f })),
+        ...(config.mappingConfidenceThreshold != null
+          ? { mappingConfidenceThreshold: config.mappingConfidenceThreshold }
+          : {}),
       },
     ],
     processing: effectiveProcessing,
-  }), [config.name, config.slug, config.fields, effectiveProcessing]);
+    aiSuggestEndpoint,
+    aiColumnSuggestEndpoint,
+  }), [config.name, config.slug, config.fields, config.mappingConfidenceThreshold, effectiveProcessing, aiSuggestEndpoint, aiColumnSuggestEndpoint]);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -137,10 +148,21 @@ export function FilefeedSheet<S extends Filefeed.SheetConfig>({
   const inner = (
     <div
       onClick={(e) => e.stopPropagation()}
-      style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: Z_INDEX.SHEET_OVERLAY, background: "rgba(0,0,0,0.4)" }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        display: "flex",
+        alignItems: "flex-start",
+        justifyContent: "center",
+        zIndex: Z_INDEX.SHEET_OVERLAY,
+        background: "rgba(0,0,0,0.4)",
+        padding: "32px 24px",
+        overflowY: "auto",
+        WebkitOverflowScrolling: "touch",
+      }}
     >
       <Providers colorScheme={theme}>
-        <div style={{ position: "relative", width: LAYOUT.SHEET_MODAL_WIDTH, maxWidth: LAYOUT.SHEET_MODAL_MAX_WIDTH, background: "var(--ff-bg-surface, white)", borderRadius: 8, boxShadow: "0 10px 30px rgba(0,0,0,0.2)", overflow: "hidden" }}>
+        <div style={{ position: "relative", width: LAYOUT.SHEET_MODAL_WIDTH, maxWidth: LAYOUT.SHEET_MODAL_MAX_WIDTH, background: "var(--ff-bg-surface, white)", borderRadius: 8, boxShadow: "0 10px 30px rgba(0,0,0,0.2)", margin: "0 auto" }}>
           <ActionIcon
             aria-label="Close importer"
             onClick={(e) => { e.stopPropagation(); setConfirmOpen(true); }}

@@ -1,10 +1,78 @@
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { detect as detectEncoding } from "jschardet";
-import type { ImportedData } from "../types";
+import type { ImportedData, MetadataRowInfo } from "../types";
 import { PROCESSING } from "../constants";
 
-export const parseCSV = (file: File, maxRows?: number): Promise<ImportedData> => {
+export interface ParseOptions {
+  autoDetectMetadataRow?: boolean;
+  skipRows?: number[];
+}
+
+const RULE_INDICATOR = /\b(only|accept(ed|able)?|correct|format(ting|ted)?|allowed|valid|values?|must|should|required|optional|note|enum|two decimals?|date format|use \w+|enter \w+|provide |if |when )/i;
+
+/**
+ * Heuristic for spotting an embedded "validation rules" / instructions row that
+ * customers sometimes append to template files (e.g. the AND Digital sample
+ * places one in row 16, the Helix template uses "Accepted values: …"). A row
+ * qualifies when at least half of its non-empty cells contain rule-like
+ * vocabulary AND at least one cell reads sentence-like (> 22 chars) AND
+ * the row is sparser than typical data rows for the same headers (lots of
+ * cells empty, since instruction rows usually only annotate a subset of cols).
+ */
+export function detectMetadataRow(
+  rows: Record<string, unknown>[],
+  headers: string[]
+): MetadataRowInfo | null {
+  if (rows.length < 3) return null;
+  const last = rows[rows.length - 1];
+  const cells = headers
+    .map((h) => last[h])
+    .filter((v) => v != null && String(v).trim() !== "");
+  if (cells.length < 2) return null;
+  const ruleHits = cells.filter((v) => RULE_INDICATOR.test(String(v))).length;
+  const sentenceHits = cells.filter((v) => String(v).length > 22).length;
+  if (sentenceHits === 0) return null;
+  const ruleRatio = ruleHits / cells.length;
+  const sentenceRatio = sentenceHits / cells.length;
+  if (ruleRatio < 0.4 && sentenceRatio < 0.5) return null;
+  const hints: Record<string, string> = {};
+  for (const h of headers) {
+    const v = last[h];
+    if (v != null && String(v).trim()) hints[h] = String(v);
+  }
+  return { rowIndex: rows.length - 1, hints };
+}
+
+function applyRowFilters(
+  rows: Record<string, unknown>[],
+  headers: string[],
+  options?: ParseOptions
+): { finalRows: Record<string, unknown>[]; metadataRow?: MetadataRowInfo } {
+  let working = rows;
+  let metadataRow: MetadataRowInfo | undefined;
+
+  if (options?.skipRows && options.skipRows.length) {
+    const skip = new Set(options.skipRows.map((n) => n - 2));
+    working = working.filter((_, idx) => !skip.has(idx));
+  }
+
+  if (options?.autoDetectMetadataRow !== false) {
+    const detected = detectMetadataRow(working, headers);
+    if (detected) {
+      metadataRow = detected;
+      working = working.slice(0, detected.rowIndex);
+    }
+  }
+
+  return { finalRows: working, metadataRow };
+}
+
+export const parseCSV = (
+  file: File,
+  maxRows?: number,
+  options?: ParseOptions
+): Promise<ImportedData> => {
   const limit = maxRows ?? Infinity;
 
   return new Promise((resolve, reject) => {
@@ -113,11 +181,17 @@ export const parseCSV = (file: File, maxRows?: number): Promise<ImportedData> =>
               reject(new Error(`CSV parsing error: ${serious.message}`));
               return;
             }
+            const { finalRows, metadataRow } = applyRowFilters(
+              rows,
+              headers,
+              options
+            );
             resolve({
               headers,
-              rows,
+              rows: finalRows,
               fileName: file.name,
               fileType: "csv",
+              ...(metadataRow ? { metadataRow } : {}),
             });
           },
         } as Papa.ParseConfig;
@@ -138,7 +212,11 @@ export const parseCSV = (file: File, maxRows?: number): Promise<ImportedData> =>
 
 const EXCEL_IN_MEMORY_LIMIT = 50 * 1024 * 1024; // 50 MB
 
-export const parseExcel = (file: File, maxRows?: number): Promise<ImportedData> => {
+export const parseExcel = (
+  file: File,
+  maxRows?: number,
+  options?: ParseOptions
+): Promise<ImportedData> => {
   const limit = maxRows ?? Infinity;
 
   return new Promise((resolve, reject) => {
@@ -205,11 +283,18 @@ export const parseExcel = (file: File, maxRows?: number): Promise<ImportedData> 
           return rowObj;
         });
 
+        const { finalRows, metadataRow } = applyRowFilters(
+          rows,
+          headers,
+          options
+        );
+
         resolve({
           headers,
-          rows,
+          rows: finalRows,
           fileName: file.name,
           fileType: "excel",
+          ...(metadataRow ? { metadataRow } : {}),
         });
       } catch (error) {
         reject(error);

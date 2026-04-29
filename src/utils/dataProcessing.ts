@@ -26,6 +26,39 @@ export const defaultTransforms: TransformRegistry = {
   formatEmail: (v) => (v == null ? v : String(v).trim().toLowerCase()),
 };
 
+/**
+ * Human-readable labels for the built-in transforms. Consumers can extend
+ * either dictionary when registering their own transforms; both functions
+ * fall back gracefully if a key is missing.
+ */
+export const TRANSFORM_LABELS: Record<string, string> = {
+  toLowerCase: "Make lowercase",
+  toUpperCase: "Make UPPERCASE",
+  capitalize: "Capitalize each word",
+  trim: "Trim extra spaces",
+  toNumber: "Treat as number",
+  formatPhoneNumber: "Keep phone digits only",
+  formatEmail: "Clean up email",
+};
+
+export const TRANSFORM_EXAMPLES: Record<string, string> = {
+  toLowerCase: "BARRY → barry",
+  toUpperCase: "barry → BARRY",
+  capitalize: "BARRY EXAMPLE → Barry Example",
+  trim: "  barry   → barry",
+  toNumber: '"1020.50" → 1020.5',
+  formatPhoneNumber: "(077) 1234-5678 → 07712345678",
+  formatEmail: "  JOHN@Example.COM → john@example.com",
+};
+
+export function transformLabel(key: string): string {
+  return TRANSFORM_LABELS[key] ?? key;
+}
+
+export function transformExample(key: string): string | undefined {
+  return TRANSFORM_EXAMPLES[key];
+}
+
 export const applyNamedTransform = (
   value: unknown,
   transformName?: string,
@@ -83,7 +116,8 @@ export const processImportedDataWithMappings = (
   fields: FieldConfig[],
   pipeline: PipelineMappings,
   registry: TransformRegistry = defaultTransforms,
-  validationRegistry?: ValidationRegistry
+  validationRegistry?: ValidationRegistry,
+  globals?: { dateOutputFormat?: string }
 ): DataRow[] => {
   const rows = processRowBatch(
     importedData.rows,
@@ -93,7 +127,8 @@ export const processImportedDataWithMappings = (
     {},
     registry,
     validationRegistry,
-    importedData.fileType
+    importedData.fileType,
+    globals
   );
 
   return applyUniquenessChecks(rows, fields);
@@ -146,7 +181,7 @@ export const validateFieldWithRegistry = (
         }
         break;
       case "date":
-        if (isNaN(Date.parse(String(value)))) {
+        if (parseFlexibleDate(value) === null) {
           errors.push({
             row: rowIndex,
             field: field.key,
@@ -155,6 +190,21 @@ export const validateFieldWithRegistry = (
           });
         }
         break;
+      case "enum": {
+        if (field.enum && field.enum.length) {
+          const s = String(value).trim();
+          const ok = field.enum.some((e) => e.toLowerCase() === s.toLowerCase());
+          if (!ok) {
+            errors.push({
+              row: rowIndex,
+              field: field.key,
+              message: `${field.label} must be one of: ${field.enum.join(", ")}`,
+              severity: "error",
+            });
+          }
+        }
+        break;
+      }
       case "boolean": {
         const booleanValues = ["true", "false", "1", "0", "yes", "no"];
         if (!booleanValues.includes(String(value).toLowerCase())) {
@@ -330,7 +380,111 @@ const excelSerialToDate = (serial: number): Date => {
 const EXCEL_SERIAL_MIN = 365;
 const EXCEL_SERIAL_MAX = 600000;
 
-export const transformValue = (value: unknown, fieldType: string, sourceFileType?: string): unknown => {
+const pad2 = (n: number): string => (n < 10 ? `0${n}` : String(n));
+
+export function formatDate(d: Date, output: string = "dd/MM/yyyy"): string {
+  if (!d || isNaN(d.getTime())) return "";
+  const yyyy = d.getUTCFullYear();
+  const mm = pad2(d.getUTCMonth() + 1);
+  const dd = pad2(d.getUTCDate());
+  switch (output) {
+    case "yyyy-MM-dd":
+      return `${yyyy}-${mm}-${dd}`;
+    case "MM/dd/yyyy":
+      return `${mm}/${dd}/${yyyy}`;
+    case "dd/MM/yyyy":
+    default:
+      return `${dd}/${mm}/${yyyy}`;
+  }
+}
+
+/**
+ * Best-effort date parser that handles the messiest mix found in real-world
+ * source files: Excel serials, ISO 8601 (with or without time), DD/MM/YYYY
+ * and US MM/DD/YYYY. Returns a Date in UTC, or null on failure. Order of
+ * attempts matters: ISO first (unambiguous), then DD/MM/YYYY (UK default),
+ * then US MM/DD/YYYY as last resort.
+ */
+export function parseFlexibleDate(
+  value: unknown,
+  sourceFileType?: string
+): Date | null {
+  if (value == null || value === "") return null;
+
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? null : value;
+  }
+
+  if (typeof value === "number") {
+    const isExcelSource =
+      sourceFileType === "excel" ||
+      sourceFileType === "xlsx" ||
+      sourceFileType === "xls";
+    const maybeExcel =
+      isExcelSource && value > EXCEL_SERIAL_MIN && value < EXCEL_SERIAL_MAX;
+    const d = maybeExcel ? excelSerialToDate(value) : new Date(value);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  if (typeof value !== "string") return null;
+  const s = value.trim();
+  if (!s) return null;
+
+  const isoMatch = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/.exec(s);
+  if (isoMatch) {
+    const [, y, mo, d, h, mi, se] = isoMatch;
+    const dt = new Date(Date.UTC(
+      Number(y), Number(mo) - 1, Number(d),
+      Number(h ?? 0), Number(mi ?? 0), Number(se ?? 0)
+    ));
+    return isNaN(dt.getTime()) ? null : dt;
+  }
+
+  const dmy = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/.exec(s);
+  if (dmy) {
+    let [, d, mo, y] = dmy;
+    let day = Number(d);
+    let month = Number(mo);
+    let year = Number(y);
+    if (year < 100) year += year < 50 ? 2000 : 1900;
+    if (day > 12 && month <= 12) {
+      // unambiguously DD/MM
+    } else if (month > 12 && day <= 12) {
+      // looks like MM/DD/YYYY, swap
+      [day, month] = [month, day];
+    }
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const dt = new Date(Date.UTC(year, month - 1, day));
+    return isNaN(dt.getTime()) ? null : dt;
+  }
+
+  const native = new Date(s);
+  return isNaN(native.getTime()) ? null : native;
+}
+
+function getDateOutputFormat(format?: unknown, fallback?: string): string {
+  if (format && typeof format === "object" && "output" in (format as object)) {
+    const v = (format as { output?: unknown }).output;
+    if (typeof v === "string" && v) return v;
+  }
+  return fallback || "dd/MM/yyyy";
+}
+
+function getNumberDigits(format?: unknown): number | undefined {
+  if (format && typeof format === "object" && "digits" in (format as object)) {
+    const v = (format as { digits?: unknown }).digits;
+    if (typeof v === "number" && v >= 0 && v <= 20) return v;
+  }
+  return undefined;
+}
+
+export const transformValue = (
+  value: unknown,
+  fieldType: string,
+  sourceFileType?: string,
+  field?: { format?: unknown; enum?: string[] },
+  globals?: { dateOutputFormat?: string }
+): unknown => {
   if (value === null || value === undefined || value === "") {
     return value;
   }
@@ -338,10 +492,20 @@ export const transformValue = (value: unknown, fieldType: string, sourceFileType
   switch (fieldType) {
     case "string":
       return String(value).trim();
+    case "enum": {
+      const s = String(value).trim();
+      if (!s) return s;
+      if (field?.enum && field.enum.length) {
+        const ci = field.enum.find((e) => e.toLowerCase() === s.toLowerCase());
+        return ci ?? s;
+      }
+      return s;
+    }
     case "number": {
       const num = Number(value);
       if (isNaN(num)) return value;
-      return num;
+      const digits = getNumberDigits(field?.format);
+      return digits == null ? num : num.toFixed(digits);
     }
     case "boolean": {
       const str = String(value).toLowerCase();
@@ -349,27 +513,35 @@ export const transformValue = (value: unknown, fieldType: string, sourceFileType
     }
     case "phone":
       return String(value).replace(/[^0-9+\-() ]/g, "").trim();
-    case "date":
-      if (value instanceof Date) {
-        return isNaN(value.getTime()) ? value : value.toISOString();
-      }
-      if (typeof value === "number") {
-        const isExcelSource = sourceFileType === "excel" || sourceFileType === "xlsx" || sourceFileType === "xls";
-        const maybeExcel = isExcelSource && value > EXCEL_SERIAL_MIN && value < EXCEL_SERIAL_MAX;
-        const d = maybeExcel ? excelSerialToDate(value) : new Date(value);
-        return isNaN(d.getTime()) ? value : d.toISOString();
-      }
-      if (typeof value === "string") {
-        const s = value.trim();
-        if (!s) return null;
-        const d = new Date(s);
-        return isNaN(d.getTime()) ? s : d.toISOString();
-      }
-      return value;
+    case "date": {
+      const parsed = parseFlexibleDate(value, sourceFileType);
+      if (!parsed) return value;
+      const outFormat = getDateOutputFormat(field?.format, globals?.dateOutputFormat);
+      return formatDate(parsed, outFormat);
+    }
     default:
       return value;
   }
 };
+
+/**
+ * Detect whether the bulk of a column's sample values are ALL CAPS strings,
+ * a strong hint that the source data was entered in uppercase and would
+ * benefit from a default `capitalize` transform.
+ */
+export function detectAllCapsField(samples: unknown[]): boolean {
+  let total = 0;
+  let caps = 0;
+  for (const s of samples) {
+    if (s == null || s === "") continue;
+    const str = String(s).trim();
+    if (!str || !/[A-Za-z]/.test(str)) continue;
+    total++;
+    if (/^[A-Z][A-Z\s'.\-]*$/.test(str) && str.length > 1) caps++;
+    if (total >= 50) break;
+  }
+  return total >= 5 && caps / total >= 0.7;
+}
 
 /**
  * Process a batch of raw rows into DataRow[] using the given pipeline/mapping.
@@ -383,10 +555,23 @@ export const processRowBatch = (
   mappingState: Record<string, string | null>,
   registry: TransformRegistry = defaultTransforms,
   validationRegistry?: ValidationRegistry,
-  sourceFileType?: string
+  sourceFileType?: string,
+  globals?: { dateOutputFormat?: string }
 ): DataRow[] => {
   const fieldByKey = new Map<string, FieldConfig>();
   for (const f of fields) fieldByKey.set(f.key, f);
+
+  const applyValueMapping = (raw: unknown, valueMappings?: Record<string, string>): unknown => {
+    if (!valueMappings || raw == null) return raw;
+    const key = String(raw).trim();
+    if (key === "") return raw;
+    if (key in valueMappings) return valueMappings[key];
+    const lower = key.toLowerCase();
+    for (const k of Object.keys(valueMappings)) {
+      if (k.toLowerCase() === lower) return valueMappings[k];
+    }
+    return raw;
+  };
 
   return rows.map((row, offset) => {
     const index = startIndex + offset;
@@ -395,14 +580,15 @@ export const processRowBatch = (
 
     if (pipeline) {
       for (const m of pipeline.fieldMappings || []) {
-        const { source, target, transform } = m;
+        const { source, target, transform, valueMappings } = m;
         if (!(source in row) || !target) continue;
         const field = fieldByKey.get(target);
         if (!field) continue;
         let v: unknown = row[source];
+        v = applyValueMapping(v, valueMappings);
         const tName = transform ?? field.defaultTransform;
         v = applyNamedTransform(v, tName, registry);
-        const coerced = transformValue(v, field.type, sourceFileType);
+        const coerced = transformValue(v, field.type, sourceFileType, field, globals);
         processed[target] = coerced;
         const fieldErrors = validateFieldWithRegistry(coerced, field, index, processed, validationRegistry);
         for (let i = 0; i < fieldErrors.length; i++) errors.push(fieldErrors[i]);
@@ -415,7 +601,7 @@ export const processRowBatch = (
         let raw: unknown = row[sourceColumn];
         const tName = field.defaultTransform;
         raw = applyNamedTransform(raw, tName, registry);
-        const coerced = transformValue(raw, field.type, sourceFileType);
+        const coerced = transformValue(raw, field.type, sourceFileType, field, globals);
         processed[targetField] = coerced;
         const fieldErrors = validateFieldWithRegistry(coerced, field, index, processed, validationRegistry);
         for (let i = 0; i < fieldErrors.length; i++) errors.push(fieldErrors[i]);
